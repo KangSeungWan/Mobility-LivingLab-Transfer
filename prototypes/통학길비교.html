@@ -1,0 +1,389 @@
+<title>통학길 비교 v0</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&display=swap">
+<style>
+/* Layout: one phone-width app column, screens swap in place; sticky top bar + bottom action bar */
+:root{
+  --bg:#f3f4f6; --surface:#ffffff; --surface2:#f7f8fa; --ink:#0a0a0a; --fg:#222222; --muted:#5f6670; --faint:#8e8e93; --line:#e5e7eb;
+  --accent:#ff5530; --accent-soft:#fff0eb; --onaccent:#ffffff; --good:#12855a; --good-soft:#e7f6ef; --warn:#b45309;
+  --seg-walk:#c4c7cf; --seg-wait:#a855f7; --seg-ride:#ff5530; --seg-dock:#ffb199; --seg-sub:#1456f0;
+  --font:'Pretendard','Noto Sans KR',system-ui,-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0d0f12; --surface:#171a1f; --surface2:#1f232a; --ink:#f4f5f7; --fg:#e4e6ea; --muted:#a3a9b3; --faint:#7d838c; --line:#2c3139;
+  --accent:#ff6a48; --accent-soft:#3a1c14; --onaccent:#ffffff; --good:#3ecf8e; --good-soft:#12291f; --warn:#f59e0b;
+  --seg-walk:#5b616b; --seg-wait:#b77cf9; --seg-ride:#ff6a48; --seg-dock:#a8644f; --seg-sub:#4a7dff; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0d0f12; --surface:#171a1f; --surface2:#1f232a; --ink:#f4f5f7; --fg:#e4e6ea; --muted:#a3a9b3; --faint:#7d838c; --line:#2c3139;
+  --accent:#ff6a48; --accent-soft:#3a1c14; --onaccent:#ffffff; --good:#3ecf8e; --good-soft:#12291f; --warn:#f59e0b;
+  --seg-walk:#5b616b; --seg-wait:#b77cf9; --seg-ride:#ff6a48; --seg-dock:#a8644f; --seg-sub:#4a7dff; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--font);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;word-break:keep-all;overflow-wrap:anywhere}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.app{max-width:460px;margin:0 auto;min-height:100%;background:var(--surface);display:flex;flex-direction:column;box-shadow:0 0 0 1px var(--line)}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--surface)}
+.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--surface);border-bottom:1px solid var(--line);
+  padding-block:12px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;align-items:center;gap:10px}
+.top .back{border:0;background:none;width:32px;height:32px;border-radius:8px;font-size:20px;line-height:1;display:grid;place-items:center}
+.top .back:hover{background:var(--surface2)}
+.top h1{font-size:16px;font-weight:700;color:var(--ink);margin:0;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.step{font-size:12px;font-weight:700;color:var(--muted);font-variant-numeric:tabular-nums;letter-spacing:.3px}
+.progress{height:3px;background:var(--line)}.progress i{display:block;height:100%;background:var(--accent);transition:width .3s}
+main{flex:1;padding-block:20px 120px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:16px}
+.eyebrow{font-size:12px;font-weight:700;letter-spacing:.6px;color:var(--accent);margin:0}
+h2{font-size:22px;line-height:1.35;font-weight:800;color:var(--ink);margin:0;text-wrap:balance;letter-spacing:-.3px}
+.lead{color:var(--muted);margin:0}
+.note{font-size:12px;color:var(--faint);margin:0}
+.card{background:var(--surface2);border-radius:14px;padding:16px}
+.bar{position:fixed;left:0;right:0;bottom:0;z-index:6;pointer-events:none}
+.bar .in{max-width:460px;margin:0 auto;background:linear-gradient(to top,var(--surface) 70%,transparent);pointer-events:auto;
+  padding-block:16px calc(16px + env(safe-area-inset-bottom,0px));padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;gap:8px}
+.btn{flex:1;border:0;border-radius:12px;padding:15px 16px;font-weight:700;font-size:16px;background:var(--ink);color:var(--surface)}
+.btn.primary{background:var(--accent);color:var(--onaccent)}
+.btn.ghost{background:var(--surface2);color:var(--ink);flex:0 0 auto}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+/* S1 */
+.trip{display:grid;grid-template-columns:20px 1fr;gap:4px 12px;align-items:center}
+.dot{width:10px;height:10px;border-radius:50%;justify-self:center}
+.dot.o{background:var(--ink)}.dot.d{background:var(--accent)}
+.vline{width:2px;height:18px;background:var(--line);justify-self:center}
+.place{font-weight:700;color:var(--ink);font-size:17px}
+.place small{display:block;font-weight:500;color:var(--faint);font-size:12px}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.kv span{display:block;font-size:12px;color:var(--faint);font-weight:600}
+.kv b{font-size:17px;color:var(--ink);font-variant-numeric:tabular-nums}
+.label{font-size:14px;font-weight:700;color:var(--ink);margin:0 0 8px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:9px 14px;font-size:14px;font-weight:600;color:var(--fg)}
+.chip[aria-pressed="true"]{background:var(--ink);color:var(--surface);border-color:var(--ink)}
+/* S2 */
+.legend{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.routes{display:flex;flex-direction:column;gap:10px}
+.route{position:relative;text-align:left;width:100%;border:1.5px solid var(--line);background:var(--surface);border-radius:14px;padding:14px 14px 12px;display:flex;flex-direction:column;gap:9px}
+.route.base{background:var(--surface2)}
+.route.sel{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.route.over{opacity:.6}
+.rhead{display:flex;align-items:center;gap:10px}
+.letter{width:28px;height:28px;border-radius:8px;background:var(--ink);color:var(--surface);font-weight:800;display:grid;place-items:center;font-size:14px;flex:none}
+.rname{flex:1;min-width:0;font-weight:700;color:var(--ink);font-size:15px}
+.rname small{display:block;font-weight:500;color:var(--faint);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tag{font-size:11px;font-weight:800;padding:3px 7px;border-radius:6px;flex:none;letter-spacing:.2px}
+.tag.new{background:var(--accent);color:var(--onaccent)}
+.tag.base{background:var(--line);color:var(--muted)}
+.tag.over{background:transparent;border:1px solid var(--warn);color:var(--warn)}
+.rnums{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-variant-numeric:tabular-nums}
+.arr{font-size:24px;font-weight:800;color:var(--ink);letter-spacing:-.5px}
+.arr small{font-size:13px;font-weight:600;color:var(--faint);margin-left:2px}
+.mins{font-size:14px;font-weight:700;color:var(--fg)}
+.cost{margin-left:auto;font-size:14px;font-weight:700;color:var(--ink)}
+.diff{display:flex;gap:6px;flex-wrap:wrap}
+.pill{font-size:12px;font-weight:700;padding:3px 8px;border-radius:999px;background:var(--surface2);color:var(--muted);font-variant-numeric:tabular-nums}
+.route.base .pill{background:var(--surface)}
+.pill.good{background:var(--good-soft);color:var(--good)}
+.pill.bad{background:var(--accent-soft);color:var(--accent)}
+.track{height:12px;border-radius:6px;background:var(--line);overflow:hidden}
+.segs{display:flex;height:100%;gap:1px}
+.segs i{display:block;height:100%;min-width:2px}
+.more{font-size:12px;color:var(--faint);font-weight:600;display:flex;justify-content:space-between}
+.more u{text-decoration:none;color:var(--accent)}
+/* sheet (S3) */
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:20;display:flex;align-items:flex-end;justify-content:center}
+.sheet{width:100%;max-width:460px;max-height:88%;overflow:auto;background:var(--surface);border-radius:20px 20px 0 0;
+  padding-block:10px calc(20px + env(safe-area-inset-bottom,0px));padding-left:max(18px,env(safe-area-inset-left,0px));padding-right:max(18px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:14px}
+.grab{width:40px;height:4px;border-radius:2px;background:var(--line);align-self:center}
+.tl{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.tl li{display:grid;grid-template-columns:46px 14px 1fr;gap:0 10px;min-height:46px}
+.tl time{font-size:13px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums;padding-top:1px}
+.tl .rail{display:flex;flex-direction:column;align-items:center}
+.tl .rail b{width:12px;height:12px;border-radius:50%;flex:none;margin-top:4px}
+.tl .rail s{flex:1;width:4px;border-radius:2px;margin:2px 0}
+.tl .what{padding-bottom:10px}
+.tl .what b{display:block;font-size:14px;color:var(--ink)}
+.tl .what span{font-size:12px;color:var(--muted)}
+.tl li:last-child{min-height:0}
+.callout{border-radius:12px;padding:12px 14px;font-size:13px;background:var(--surface2);color:var(--fg)}
+.callout b{color:var(--ink)}
+.callout.good{background:var(--good-soft)}
+/* interstitial / S4 / done */
+.hero-num{font-size:44px;font-weight:800;color:var(--ink);letter-spacing:-1px;line-height:1.1;font-variant-numeric:tabular-nums}
+.timein{display:flex;align-items:center;gap:10px}
+.timein input{font:inherit;font-size:22px;font-weight:800;padding:10px 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);width:150px}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.cmp .card b{display:block;font-size:22px;font-weight:800;color:var(--ink);font-variant-numeric:tabular-nums}
+.cmp .card span{font-size:12px;color:var(--faint);font-weight:600}
+.yn{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.summary{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;white-space:pre-wrap;word-break:break-all;background:var(--surface2);border-radius:12px;padding:14px;margin:0;color:var(--ink);user-select:all}
+.toast{position:fixed;left:50%;bottom:calc(96px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--surface);padding:10px 16px;border-radius:999px;font-size:14px;font-weight:600;z-index:30}
+.fade{animation:fade .25s ease}
+@keyframes fade{from{opacity:.4;transform:translateY(6px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.fade{animation:none}.progress i{transition:none}}
+</style>
+
+<div class="app">
+  <header class="top">
+    <button class="back" id="backBtn" aria-label="이전 화면">‹</button>
+    <h1 id="topTitle">통학길 비교</h1>
+    <span class="step" id="stepLabel"></span>
+  </header>
+  <div class="progress"><i id="prog" style="width:0"></i></div>
+  <main id="view"></main>
+</div>
+<div class="bar"><div class="in" id="actions"></div></div>
+<div id="sheetHost"></div>
+<div id="toastHost"></div>
+
+<script>
+(function(){
+const SEG = {walk:'도보', wait:'대기', ride:'주행', dock:'타슈 대여·반납', sub:'지하철'};
+const BASE_COST = 1550;
+const ROUTES = {
+  A:{name:'버스 + 지하철', sub:'108번 버스 → 월평역 → 지하철', cost:1550, depart:'14:11', arrive:'15:03', total:52, base:true,
+     steps:[['14:11','walk',4,'공대 3호관 → 버스 정류장','도보 4분'],['14:15','wait',9,'108번 버스 대기','정류장에서 9분 대기'],['14:24','ride',5,'108번 버스 탑승','5분 · 월평역 하차'],['14:29','walk',7,'월평역까지 도보','도보 7분'],['14:36','walk',3,'역내 이동','출입구 → 승강장 3분'],['14:39','wait',6,'열차 대기','14:45 열차까지 6분'],['14:45','sub',18,'지하철 1호선','월평역 → 대전역 18분']],
+     tip:'환승 여유 6분 · 버스 대기 9분 + 열차 대기 6분 = 기다리는 시간 15분'},
+  B:{name:'전 구간 택시', sub:'공대 3호관 → 대전역', cost:15520, depart:'14:11', arrive:'14:39', total:28,
+     steps:[['14:11','wait',4,'택시 호출·대기','배차까지 4분'],['14:15','ride',24,'택시 주행','공대 3호관 → 대전역 24분']],
+     tip:'가장 빠르지만 대중교통보다 13,970원 더 듭니다'},
+  C:{name:'전 구간 타슈', sub:'공공자전거로 대전역까지', cost:0, costNote:'60분 내 반납 시', depart:'14:11', arrive:'15:09', total:58, plus:true,
+     steps:[['14:11','walk',5,'타슈 대여소까지 도보','도보 5분'],['14:16','dock',1,'타슈 대여','1분'],['14:17','ride',51,'타슈 주행','대전역 인근 대여소까지 51분'],['15:08','dock',1,'타슈 반납','1분']],
+     tip:'반납 후 대전역까지 걷는 시간은 빠져 있어 실제로는 58분보다 깁니다'},
+  D:{name:'타슈 + 지하철', sub:'타슈 → 월평역 → 지하철', cost:1550, depart:'14:11', arrive:'14:53', total:42, isNew:true,
+     steps:[['14:11','walk',5,'타슈 대여소까지 도보','도보 5분'],['14:16','dock',1,'타슈 대여','1분'],['14:17','ride',9,'타슈 주행','월평역 인근 대여소까지 9분'],['14:26','dock',1,'타슈 반납','1분'],['14:27','walk',3,'승강장까지 도보','도보·역내 3분'],['14:30','wait',5,'열차 대기','14:35 열차까지 5분'],['14:35','sub',18,'지하철 1호선','월평역 → 대전역 18분']],
+     tip:'버스 경로보다 한 대 앞 열차(14:35)를 탑니다 · 요금은 같은 1,550원'},
+  E:{name:'택시 + 지하철', sub:'택시 → 월평역 → 지하철', cost:7030, depart:'14:11', arrive:'14:53', total:42, isNew:true,
+     steps:[['14:11','wait',4,'택시 호출·대기','배차까지 4분'],['14:15','ride',7,'택시 주행','월평역까지 7분'],['14:22','walk',3,'승강장까지 도보','도보·역내 3분'],['14:25','wait',10,'열차 대기','14:35 열차까지 10분'],['14:35','sub',18,'지하철 1호선','월평역 → 대전역 18분']],
+     tip:'D와 같은 14:53 도착 · 열차를 10분 기다려 택시로 아낀 시간이 줄어듭니다'}
+};
+const ORDER1=['A','B','C'];
+const ORDER2=['A','B','D','E','C'];
+const LIMITS=[{v:0,t:'추가 비용 없이'},{v:3000,t:'+3,000원까지'},{v:7000,t:'+7,000원까지'},{v:Infinity,t:'상관없음'}];
+const REASONS=['빨리 도착해서','요금이 싸서','갈아타기가 적어서','기다리는 시간이 적어서','걷기·자전거가 부담돼서','익숙한 방법이라서','날씨·짐 때문에'];
+
+const S = {screen:'intro', limit:null, pick1:null, pick2:null, reasons:[], intent:null, actual:'14:55', took:null, hist:[]};
+const SCREENS = {intro:[0,'통학길 비교'], s1:[1,'구간·조건 선택'], r1:[2,'경로 비교 · 1차'], gate:[2,'새 경로 추가'], r2:[3,'경로 비교 · 2차'], why:[4,'선택 이유'], s4:[5,'도착 기록 미리보기'], done:[6,'응답 완료']};
+
+const $=s=>document.querySelector(s);
+const won=n=>n.toLocaleString('ko-KR')+'원';
+const h=(tag,attrs,...kids)=>{const e=document.createElement(tag);for(const k in (attrs||{})){const v=attrs[k];if(v==null||v===false)continue;if(k.startsWith('on'))e.addEventListener(k.slice(2),v);else if(k==='class')e.className=v;else if(k==='html')e.innerHTML=v;else e.setAttribute(k,v===true?'':v);}for(const c of kids.flat()){if(c==null||c===false)continue;e.append(c.nodeType?c:document.createTextNode(c));}return e;};
+const toMin=t=>{const[a,b]=t.split(':').map(Number);return a*60+b;};
+const fmtDiff=(m)=>m===0?'같은 시각':(m<0?`${-m}분 일찍`:`${m}분 늦게`);
+
+function go(next){S.hist.push(S.screen);S.screen=next;render();window.scrollTo(0,0);}
+function back(){if(!S.hist.length)return;S.screen=S.hist.pop();render();window.scrollTo(0,0);}
+$('#backBtn').addEventListener('click',back);
+
+function actions(...btns){const a=$('#actions');a.replaceChildren(...btns);}
+function toast(t){const el=h('div',{class:'toast',role:'status'},t);$('#toastHost').replaceChildren(el);setTimeout(()=>el.remove(),1800);}
+
+function render(){
+  const [n,title]=SCREENS[S.screen];
+  $('#topTitle').textContent=title;
+  $('#stepLabel').textContent=n>0&&n<6?`${n} / 5`:'';
+  $('#prog').style.width=(n/6*100)+'%';
+  $('#backBtn').style.visibility=S.hist.length&&S.screen!=='done'?'visible':'hidden';
+  const v=$('#view');v.replaceChildren();v.classList.remove('fade');void v.offsetWidth;v.classList.add('fade');
+  ({intro,s1,r1:()=>compare(1),gate,r2:()=>compare(2),why,s4,done})[S.screen](v);
+}
+
+function intro(v){
+  v.append(
+    h('p',{class:'eyebrow'},'모빌리티 리빙랩 1조 C.A.W · 프로토타입 v0'),
+    h('h2',null,'같은 통학길, 어떤 경로를 고르시겠어요?'),
+    h('p',{class:'lead'},'충남대에서 대전역까지 가는 상황을 가정하고, 경로를 두 번 골라 주세요. 약 2분 걸립니다.'),
+    h('div',{class:'card'},
+      h('p',{class:'label'},'이렇게 진행돼요'),
+      h('ol',{style:'margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;color:var(--fg)'},
+        h('li',null,'출발·도착과 추가로 낼 수 있는 비용 확인'),
+        h('li',null,'경로 3개 중 하나 고르기'),
+        h('li',null,'경로가 더 추가되면 다시 고르기'),
+        h('li',null,'고른 이유 체크')
+      )
+    ),
+    h('p',{class:'note'},'응답은 이름 없이 집계됩니다. 화면의 시간·요금은 지도앱 자료와 일부 가정으로 만든 예시값이며, 실측 전입니다.')
+  );
+  actions(h('button',{class:'btn primary',onclick:()=>go('s1')},'시작하기'));
+}
+
+function s1(v){
+  const chips=LIMITS.map((l,i)=>h('button',{class:'chip','aria-pressed':String(S.limit===i),onclick:()=>{S.limit=i;render();}},l.t));
+  v.append(
+    h('h2',null,'오늘의 이동 상황'),
+    h('div',{class:'card trip'},
+      h('i',{class:'dot o'}),h('div',{class:'place'},'충남대 공과대학 3호관',h('small',null,'출발')),
+      h('i',{class:'vline'}),h('div'),
+      h('i',{class:'dot d'}),h('div',{class:'place'},'대전역',h('small',null,'도착'))
+    ),
+    h('div',{class:'row2'},
+      h('div',{class:'card kv'},h('span',null,'출발 시각'),h('b',null,'평일 14:11')),
+      h('div',{class:'card kv'},h('span',null,'대중교통 요금'),h('b',null,won(BASE_COST)))
+    ),
+    h('div',null,
+      h('p',{class:'label'},'버스·지하철 요금보다 얼마까지 더 낼 수 있나요?'),
+      h('div',{class:'chips'},chips),
+      h('p',{class:'note',style:'margin-top:8px'},'한도를 넘는 경로도 보이지만, 흐리게 표시됩니다.')
+    )
+  );
+  actions(h('button',{class:'btn primary',disabled:S.limit==null,onclick:()=>go('r1')},'경로 보기'));
+}
+
+function segBar(r){
+  const track=h('div',{class:'track',style:`width:${Math.min(100,r.total/60*100)}%`});
+  const segs=h('div',{class:'segs'});
+  r.steps.forEach(st=>segs.append(h('i',{style:`flex:${st[2]} 1 0;background:var(--seg-${st[1]})`,title:`${SEG[st[1]]} ${st[2]}분`})));
+  track.append(segs);return track;
+}
+function waitOf(r){return r.steps.filter(s=>s[1]==='wait').reduce((a,s)=>a+s[2],0);}
+
+function routeCard(k,round,pickKey){
+  const r=ROUTES[k], b=ROUTES.A;
+  const extra=r.cost-BASE_COST, lim=LIMITS[S.limit].v, over=!r.base&&extra>lim;
+  const dmin=toMin(r.arrive)-toMin(b.arrive);
+  const pills=[];
+  if(r.base){pills.push(h('span',{class:'pill'},'기다림 '+waitOf(r)+'분'));}
+  else{
+    pills.push(h('span',{class:'pill '+(dmin<0?'good':dmin>0?'bad':'')},'버스+지하철보다 '+(r.plus&&dmin>0?`${dmin}분 이상 늦게`:fmtDiff(dmin))));
+    pills.push(h('span',{class:'pill '+(extra>0?'bad':extra<0?'good':'')},extra===0?'추가 요금 없음':extra>0?'+'+won(extra):won(extra)));
+    pills.push(h('span',{class:'pill'},'기다림 '+waitOf(r)+'분'));
+  }
+  const selected=S[pickKey]===k;
+  return h('button',{class:'route'+(r.base?' base':'')+(selected?' sel':'')+(over?' over':''),'aria-pressed':String(selected),onclick:()=>openSheet(k,pickKey)},
+    h('div',{class:'rhead'},
+      h('span',{class:'letter'},k),
+      h('div',{class:'rname'},r.name,h('small',null,r.sub)),
+      r.base?h('span',{class:'tag base'},'기준'):null,
+      round===2&&r.isNew?h('span',{class:'tag new'},'NEW'):null,
+      over?h('span',{class:'tag over'},'한도 초과'):null
+    ),
+    h('div',{class:'rnums'},
+      h('span',{class:'arr'},r.arrive+(r.plus?'+':''),h('small',null,'도착')),
+      h('span',{class:'mins'},r.total+'분'+(r.plus?'+':'')),
+      h('span',{class:'cost'},won(r.cost)+(r.costNote?'*':''))
+    ),
+    segBar(r),
+    h('div',{class:'diff'},pills),
+    h('div',{class:'more'},h('span',null,r.costNote?'* '+r.costNote:''),h('u',null,selected?'✓ 선택함':'자세히 보기 ›'))
+  );
+}
+
+function legend(){return h('div',{class:'legend'},...Object.keys(SEG).map(k=>h('span',null,h('i',{style:`background:var(--seg-${k})`}),SEG[k])));}
+
+function compare(round){
+  const v=$('#view');const key=round===1?'pick1':'pick2';
+  v.append(
+    h('div',null,
+      h('p',{class:'eyebrow'},round===1?'1차 선택':'2차 선택 · 경로 2개 추가'),
+      h('h2',null,round===1?'어떤 경로로 가시겠어요?':'다시 고른다면 어떤 경로로 가시겠어요?'),
+    ),
+    h('p',{class:'lead',style:'font-size:13px'},'평일 14:11 · 공대 3호관 → 대전역 · 도착이 빠른 순 (기준 경로는 맨 위)'),
+    legend(),
+    h('div',{class:'routes'},(round===1?ORDER1:ORDER2).map(k=>routeCard(k,round,key))),
+    h('p',{class:'note'},'막대 길이는 전체 소요시간(60분 기준)입니다. 카드를 누르면 단계별 시각을 볼 수 있어요.')
+  );
+  const pick=S[key];
+  actions(h('button',{class:'btn primary',disabled:!pick,onclick:()=>go(round===1?'gate':'why')},pick?`${pick} 경로로 결정`:'경로를 골라 주세요'));
+}
+
+function openSheet(k,pickKey){
+  const r=ROUTES[k];const host=$('#sheetHost');
+  const close=()=>{host.replaceChildren();document.removeEventListener('keydown',esc);};
+  const esc=e=>{if(e.key==='Escape')close();};
+  document.addEventListener('keydown',esc);
+  const tl=h('ol',{class:'tl'});
+  r.steps.forEach(st=>tl.append(h('li',null,h('time',null,st[0]),h('div',{class:'rail'},h('b',{style:`background:var(--seg-${st[1]})`}),h('s',{style:`background:var(--seg-${st[1]})`})),h('div',{class:'what'},h('b',null,st[3]),h('span',null,st[4])))));
+  tl.append(h('li',null,h('time',null,r.arrive),h('div',{class:'rail'},h('b',{style:'background:var(--ink)'})),h('div',{class:'what'},h('b',null,'대전역 도착'+(r.plus?' (반납 후 도보 별도)':'')),h('span',null,`총 ${r.total}분${r.plus?'+':''} · ${won(r.cost)}${r.costNote?' ('+r.costNote+')':''}`))));
+  const sheet=h('div',{class:'sheet',role:'dialog','aria-modal':'true','aria-label':r.name+' 상세'},
+    h('i',{class:'grab'}),
+    h('div',{class:'rhead'},h('span',{class:'letter'},k),h('div',{class:'rname',style:'font-size:17px'},r.name,h('small',null,r.sub)),h('button',{class:'back',style:'border:0;background:none;font-size:22px;width:32px;height:32px',onclick:close,'aria-label':'닫기'},'×')),
+    h('div',{class:'rnums'},h('span',{class:'arr'},r.arrive+(r.plus?'+':''),h('small',null,'도착')),h('span',{class:'mins'},r.total+'분'+(r.plus?'+':'')),h('span',{class:'cost'},won(r.cost))),
+    segBar(r),
+    tl,
+    h('div',{class:'callout'+(k==='D'?' good':'')},r.tip),
+    h('div',{style:'display:flex;gap:8px'},
+      h('button',{class:'btn ghost',onclick:close},'닫기'),
+      h('button',{class:'btn primary',onclick:()=>{S[pickKey]=k;close();render();}},'이 경로로 갈래요'))
+  );
+  const scrim=h('div',{class:'scrim',onclick:e=>{if(e.target===scrim)close();}},sheet);
+  host.replaceChildren(scrim);
+  sheet.querySelector('.btn.primary').focus();
+}
+
+function gate(v){
+  const p=ROUTES[S.pick1];
+  v.append(
+    h('p',{class:'eyebrow'},'1차 선택 완료'),
+    h('h2',null,`${S.pick1} ${p.name}을(를) 고르셨어요`),
+    h('p',{class:'lead'},'이번에는 같은 상황에서 경로 2개가 더 나옵니다. 앞의 3개는 그대로 있어요. 다시 한 번 골라 주세요.'),
+    h('div',{class:'card',style:'display:flex;flex-direction:column;gap:10px'},
+      ...['D','E'].map(k=>h('div',{class:'rhead'},h('span',{class:'letter'},k),h('div',{class:'rname'},ROUTES[k].name,h('small',null,ROUTES[k].sub)),h('span',{class:'tag new'},'NEW')))
+    )
+  );
+  actions(h('button',{class:'btn primary',onclick:()=>{if(!S.pick2)S.pick2=null;go('r2');}},'추가된 경로 보기'));
+}
+
+function why(v){
+  const changed=S.pick1!==S.pick2;
+  const chips=REASONS.map(r=>h('button',{class:'chip','aria-pressed':String(S.reasons.includes(r)),onclick:()=>{S.reasons=S.reasons.includes(r)?S.reasons.filter(x=>x!==r):[...S.reasons,r];render();}},r));
+  const intents=['자주 쓸 것 같다','가끔 쓸 것 같다','잘 안 쓸 것 같다'];
+  v.append(
+    h('p',{class:'eyebrow'},changed?`${S.pick1} → ${S.pick2} 로 바꾸셨어요`:`그대로 ${S.pick2} 를 고르셨어요`),
+    h('h2',null,`${S.pick2} ${ROUTES[S.pick2].name}을(를) 고른 이유는?`),
+    h('div',null,h('p',{class:'label'},'해당하는 것을 모두 골라 주세요'),h('div',{class:'chips'},chips)),
+    h('div',null,h('p',{class:'label'},'실제 통학에서 이런 비교 화면이 있다면?'),
+      h('div',{class:'chips'},intents.map(t=>h('button',{class:'chip','aria-pressed':String(S.intent===t),onclick:()=>{S.intent=t;render();}},t))))
+  );
+  actions(h('button',{class:'btn primary',disabled:!S.reasons.length||!S.intent,onclick:()=>go('s4')},'다음'));
+}
+
+function s4(v){
+  const r=ROUTES[S.pick2];
+  const exp=toMin(r.arrive), act=S.actual?toMin(S.actual):null, base=toMin(ROUTES.A.arrive);
+  const vsExp=act==null?null:act-exp, vsBase=act==null?null:base-act;
+  v.append(
+    h('p',{class:'eyebrow'},'미리보기 · 실제 웹페이지의 마지막 화면'),
+    h('h2',null,'도착하면 이렇게 기록해요'),
+    h('p',{class:'lead'},`${S.pick2} ${r.name}으로 실제 이동했다고 가정하고, 도착 시각을 바꿔 보세요.`),
+    h('div',{class:'card',style:'display:flex;flex-direction:column;gap:12px'},
+      h('div',{class:'kv'},h('span',null,'예상 도착'),h('b',null,r.arrive)),
+      h('label',{class:'label',for:'actualTime',style:'margin:0'},'실제 도착 시각'),
+      h('div',{class:'timein'},h('input',{id:'actualTime',type:'time',value:S.actual,oninput:e=>{S.actual=e.target.value;render();setTimeout(()=>{const i=$('#actualTime');i&&i.focus();},0);}}))
+    ),
+    h('div',{class:'cmp'},
+      h('div',{class:'card'},h('span',null,'예상과 차이'),h('b',null,vsExp==null?'–':vsExp===0?'정확':vsExp>0?`${vsExp}분 늦음`:`${-vsExp}분 빠름`)),
+      h('div',{class:'card'},h('span',null,'버스+지하철 대비'),h('b',{style:vsBase>0?'color:var(--good)':''},vsBase==null?'–':vsBase>0?`${vsBase}분 일찍`:vsBase===0?'같음':`${-vsBase}분 늦게`))
+    ),
+    h('div',null,h('p',{class:'label'},'타려던 열차·버스를 탔나요?'),
+      h('div',{class:'yn'},['탔어요','놓쳤어요'].map(t=>h('button',{class:'chip','aria-pressed':String(S.took===t),style:'border-radius:12px;padding:12px',onclick:()=>{S.took=t;render();}},t)))),
+    h('p',{class:'note'},'이 화면은 다음 단계 웹페이지에서 쓸 기록 화면의 예시입니다. 설문 집계에는 들어가지 않아요.')
+  );
+  actions(h('button',{class:'btn primary',onclick:()=>go('done')},'응답 마치기'));
+}
+
+function summaryText(){
+  const changed=S.pick1!==S.pick2, toCombo=['D','E'].includes(S.pick2);
+  return [`[통학길 비교 v0 응답]`,`비용 한도: ${LIMITS[S.limit].t}`,`1차: ${S.pick1} ${ROUTES[S.pick1].name}`,`2차: ${S.pick2} ${ROUTES[S.pick2].name}`,`복합경로 전환: ${toCombo?'예':'아니오'}${changed?'':' (선택 유지)'}`,`이유: ${S.reasons.join(', ')}`,`이용 의향: ${S.intent}`].join('\n');
+}
+function done(v){
+  const txt=summaryText();
+  const pre=h('pre',{class:'summary',id:'sumText'},txt);
+  v.append(
+    h('p',{class:'eyebrow'},'응답 완료'),
+    h('h2',null,'참여해 주셔서 감사합니다'),
+    h('p',{class:'lead'},'아래 응답 내용을 복사해서 설문 링크나 단톡방에 붙여 넣어 주세요.'),
+    pre,
+    h('div',{class:'card'},
+      h('p',{class:'label'},'이 실험에서 확인하려는 것'),
+      h('p',{style:'margin:0;font-size:14px'},'기존 경로(A·B·C)를 그대로 둔 채 복합 경로(D·E)를 추가했을 때, 선택이 복합 경로로 바뀌는 사람이 30% 이상인지 봅니다.'))
+  );
+  actions(
+    h('button',{class:'btn ghost',onclick:()=>{Object.assign(S,{screen:'intro',limit:null,pick1:null,pick2:null,reasons:[],intent:null,actual:'14:55',took:null,hist:[]});render();}},'처음으로'),
+    h('button',{class:'btn primary',onclick:()=>{
+      const fallback=()=>{const r=document.createRange();r.selectNodeContents(pre);const s=getSelection();s.removeAllRanges();s.addRange(r);toast('선택됨 · 길게 눌러 복사하세요');};
+      try{navigator.clipboard.writeText(txt).then(()=>toast('응답 내용을 복사했어요'),fallback);}catch(e){fallback();}
+    }},'응답 내용 복사')
+  );
+}
+
+render();
+})();
+</script>

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>API 점검 · 통학길 비교</title>
+<link rel="stylesheet" href="style.css">
+<style>
+.wrap{max-width:720px;margin:0 auto;padding:20px max(16px,env(safe-area-inset-right)) 40px max(16px,env(safe-area-inset-left));display:flex;flex-direction:column;gap:14px}
+h1{margin:0;font-size:22px;color:var(--ink)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:end}
+.row label{display:flex;flex-direction:column;font-size:12px;font-weight:700;color:var(--muted);gap:4px}
+.row input{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--bg);width:170px}
+.btn{border:0;border-radius:10px;padding:10px 16px;font-weight:700;background:var(--ink);color:var(--bg)}
+.btn.sub{background:var(--surface);color:var(--ink);border:1px solid var(--line)}
+.keys{display:flex;gap:6px;flex-wrap:wrap}
+.k{font-size:12px;font-weight:700;padding:4px 8px;border-radius:999px;background:var(--surface);color:var(--muted)}
+.k.on{background:var(--good-soft);color:var(--good)}
+.chk{border:1px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:6px}
+.chk.ok{border-color:var(--good)}
+.chk.bad{border-color:var(--accent)}
+.chk b{color:var(--ink)}
+.st{font-size:13px;font-weight:700}
+.st.ok{color:var(--good)}.st.bad{color:var(--accent)}
+pre{margin:0;background:var(--surface);border-radius:10px;padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:220px;overflow:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>API 점검</h1>
+  <p class="hint">키마다 실제로 호출해 보고 결과와 원본 응답 앞부분을 보여 줘요. 키 값은 ***로 가려져요. 결과가 이상하면 아래 <b>결과 전체 복사</b>를 눌러 그대로 보내 주세요.</p>
+  <div class="row">
+    <label for="arsId">정류장 번호 (선택)<input id="arsId" inputmode="numeric" placeholder="예: 정류장 표지판 5자리"></label>
+    <label for="nodeId">TAGO 정류장 ID (선택)<input id="nodeId" placeholder="예: DJB8001793"></label>
+    <button class="btn" id="run">점검 시작</button>
+    <button class="btn sub" id="copy" disabled>결과 전체 복사</button>
+  </div>
+  <div class="keys" id="keys"></div>
+  <div id="out" class="content"><p class="hint">'점검 시작'을 눌러 주세요. 10초 정도 걸려요.</p></div>
+  <p class="hint"><a href="/">← 통학길 비교로 돌아가기</a></p>
+</div>
+<script>
+let last = null;
+const out = document.getElementById('out');
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+document.getElementById('run').onclick = async () => {
+  out.replaceChildren(el('p', 'hint', '점검 중…'));
+  const p = new URLSearchParams();
+  const a = document.getElementById('arsId').value.trim(), n = document.getElementById('nodeId').value.trim();
+  if (a) p.set('arsId', a); if (n) p.set('nodeId', n);
+  try {
+    const r = await fetch('/api/health?' + p); last = await r.json();
+  } catch (e) { out.replaceChildren(el('p', 'err', '서버에 연결하지 못했어요: ' + e.message)); return; }
+  const keys = document.getElementById('keys'); keys.replaceChildren();
+  for (const [k, v] of Object.entries(last.keys || {})) keys.append(el('span', 'k' + (v ? ' on' : ''), `${k} ${v ? '있음' : '없음'}`));
+  out.replaceChildren();
+  if (last.note) out.append(el('p', 'banner', last.note));
+  for (const c of last.checks || []) {
+    const box = el('div', 'chk ' + (c.ok ? 'ok' : 'bad'));
+    box.append(el('b', null, c.name), el('span', 'st ' + (c.ok ? 'ok' : 'bad'), (c.ok ? '✓ ' : '✕ ') + c.message), el('span', 'note', `HTTP ${c.http} · ${c.ms}ms · ${c.url}`), el('pre', null, c.raw || '(빈 응답)'));
+    out.append(box);
+  }
+  document.getElementById('copy').disabled = false;
+};
+document.getElementById('copy').onclick = async () => {
+  const text = JSON.stringify(last, null, 2);
+  try { await navigator.clipboard.writeText(text); document.getElementById('copy').textContent = '복사했어요'; }
+  catch { const t = el('textarea'); t.value = text; t.style.cssText = 'width:100%;height:200px'; out.prepend(t); t.select(); }
+};
+</script>
+</body>
+</html>

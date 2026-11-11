@@ -1,0 +1,17 @@
+# 비밀 키 — 절대 커밋하지 않기
+.env
+.env.*
+!.env.example
+
+node_modules/
+.vercel/
+*.zip
+.DS_Store
+Thumbs.db
+
+# 내부 자료 (공개 금지)
+DESIGN-brandlogy.md
+HANDOFF*.md
+slides-deck3/
+*.docx
+전달받은 내용/

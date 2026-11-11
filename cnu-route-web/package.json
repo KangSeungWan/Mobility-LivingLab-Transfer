@@ -1,0 +1,8 @@
+{
+  "name": "cnu-route-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "대전 통학길 복합경로 비교 웹페이지 (C.A.W · 모빌리티리빙랩 1조)",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}

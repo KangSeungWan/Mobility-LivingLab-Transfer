@@ -1,0 +1,235 @@
+<title>통학길 비교 계산기</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&display=swap">
+<style>
+/* Layout: single phone-width column — trip header, departure control, route cards, editable assumptions */
+:root{
+  --bg:#f3f4f6; --surface:#ffffff; --surface2:#f7f8fa; --ink:#0a0a0a; --fg:#222222; --muted:#5f6670; --faint:#8e8e93; --line:#e5e7eb;
+  --accent:#ff5530; --accent-soft:#fff0eb; --onaccent:#ffffff; --good:#12855a; --good-soft:#e7f6ef; --warn:#b45309; --warn-soft:#fff6e5;
+  --walk:#c4c7cf; --wait:#a855f7; --ride:#ff5530; --dock:#ffb199; --sub:#1456f0;
+  --font:'Pretendard','Noto Sans KR',system-ui,-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0d0f12; --surface:#171a1f; --surface2:#1f232a; --ink:#f4f5f7; --fg:#e4e6ea; --muted:#a3a9b3; --faint:#7d838c; --line:#2c3139;
+  --accent:#ff6a48; --accent-soft:#3a1c14; --onaccent:#ffffff; --good:#3ecf8e; --good-soft:#12291f; --warn:#f59e0b; --warn-soft:#2e2310;
+  --walk:#5b616b; --wait:#b77cf9; --ride:#ff6a48; --dock:#a8644f; --sub:#4a7dff; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0d0f12; --surface:#171a1f; --surface2:#1f232a; --ink:#f4f5f7; --fg:#e4e6ea; --muted:#a3a9b3; --faint:#7d838c; --line:#2c3139;
+  --accent:#ff6a48; --accent-soft:#3a1c14; --onaccent:#ffffff; --good:#3ecf8e; --good-soft:#12291f; --warn:#f59e0b; --warn-soft:#2e2310;
+  --walk:#5b616b; --wait:#b77cf9; --ride:#ff6a48; --dock:#a8644f; --sub:#4a7dff; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--font);font-size:15px;line-height:1.5;word-break:keep-all;overflow-wrap:anywhere;-webkit-font-smoothing:antialiased}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.app{max-width:520px;margin:0 auto;background:var(--surface);min-height:100%;box-shadow:0 0 0 1px var(--line);
+  padding-block:20px 40px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:14px}
+.brand{display:flex;align-items:baseline;gap:8px}
+.brand h1{margin:0;font-size:22px;font-weight:800;color:var(--ink);letter-spacing:-.4px}
+.brand span{font-size:12px;font-weight:700;color:var(--accent)}
+.banner{background:var(--warn-soft);color:var(--warn);border-radius:10px;padding:10px 12px;font-size:13px;font-weight:600;margin:0}
+.trip{display:grid;grid-template-columns:20px 1fr;gap:2px 10px;align-items:center;background:var(--surface2);border-radius:14px;padding:12px 14px}
+.dot{width:10px;height:10px;border-radius:50%;justify-self:center}
+.dot.o{background:var(--ink)}.dot.d{background:var(--accent)}
+.vl{width:2px;height:12px;background:var(--line);justify-self:center}
+.trip b{color:var(--ink);font-size:15px}
+.dep{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.dep label{font-size:13px;font-weight:700;color:var(--muted)}
+.dep input[type=time]{border:1.5px solid var(--line);background:var(--surface);border-radius:10px;padding:7px 10px;font-weight:800;font-size:17px;color:var(--ink);font-variant-numeric:tabular-nums}
+.chip{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:7px 12px;font-size:13px;font-weight:700}
+.chip[aria-pressed="true"]{background:var(--ink);color:var(--surface);border-color:var(--ink)}
+.hint{font-size:13px;color:var(--muted);margin:0}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.routes{display:flex;flex-direction:column;gap:10px}
+.route{border:1.5px solid var(--line);border-radius:14px;padding:13px 14px;display:flex;flex-direction:column;gap:8px;background:var(--surface)}
+.route.base{background:var(--surface2)}
+.route.best{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.rh{display:flex;align-items:center;gap:10px}
+.letter{width:28px;height:28px;border-radius:8px;background:var(--ink);color:var(--surface);font-weight:800;display:grid;place-items:center;font-size:14px;flex:none}
+.rn{flex:1;min-width:0;font-weight:700;color:var(--ink)}
+.rn small{display:block;font-weight:500;color:var(--faint);font-size:12px}
+.tag{font-size:11px;font-weight:800;padding:3px 7px;border-radius:6px;flex:none}
+.tag.base{background:var(--line);color:var(--muted)}
+.tag.best{background:var(--accent);color:var(--onaccent)}
+.nums{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-variant-numeric:tabular-nums}
+.arr{font-size:24px;font-weight:800;color:var(--ink);letter-spacing:-.5px}
+.arr small{font-size:13px;font-weight:600;color:var(--faint);margin-left:2px}
+.mins{font-weight:700}
+.fare{margin-left:auto;font-weight:700;color:var(--ink)}
+.track{height:12px;border-radius:6px;background:var(--line);overflow:hidden}
+.segs{display:flex;height:100%;gap:1px}
+.segs i{display:block;height:100%;min-width:2px}
+.pills{display:flex;gap:6px;flex-wrap:wrap}
+.pill{font-size:12px;font-weight:700;padding:3px 8px;border-radius:999px;background:var(--surface2);color:var(--muted);font-variant-numeric:tabular-nums}
+.route.base .pill{background:var(--surface)}
+.pill.good{background:var(--good-soft);color:var(--good)}
+.pill.bad{background:var(--accent-soft);color:var(--accent)}
+details>summary{cursor:pointer;font-size:12px;font-weight:700;color:var(--accent);list-style:none}
+details>summary::-webkit-details-marker{display:none}
+.tl{list-style:none;margin:8px 0 0;padding:0}
+.tl li{display:grid;grid-template-columns:44px 12px 1fr;gap:0 10px;min-height:40px}
+.tl time{font-size:13px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums}
+.tl .rail{display:flex;flex-direction:column;align-items:center}
+.tl .rail b{width:10px;height:10px;border-radius:50%;margin-top:5px;flex:none}
+.tl .rail s{flex:1;width:3px;border-radius:2px;margin:2px 0}
+.tl .w b{display:block;font-size:13px;color:var(--ink)}
+.tl .w span{font-size:12px;color:var(--muted)}
+.note{font-size:12px;color:var(--faint);margin:0}
+.settings{border:1px solid var(--line);border-radius:14px;padding:12px 14px}
+.settings>summary{font-size:14px;color:var(--ink)}
+.grp{margin-top:12px}
+.grp h3{font-size:13px;margin:0 0 6px;color:var(--ink)}
+.fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px}
+.f{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--muted);font-weight:600}
+.f input{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 8px;font-size:14px;font-weight:700;color:var(--ink);width:100%;font-variant-numeric:tabular-nums}
+.f input.changed{border-color:var(--accent)}
+.reset{margin-top:12px}
+</style>
+
+<div class="app">
+  <div class="brand"><h1>통학길 비교</h1><span>계산기 · 오프라인</span></div>
+  <p class="banner">실시간 정보 없이 배차간격과 이동시간 가정값으로 계산하는 버전이에요. 숫자는 맨 아래 '계산 기준값'에서 바꿀 수 있어요.</p>
+
+  <div class="trip">
+    <i class="dot o"></i><b>충남대 공과대학 3호관</b>
+    <i class="vl"></i><span></span>
+    <i class="dot d"></i><b>대전역</b>
+  </div>
+
+  <div class="dep">
+    <label for="depTime">출발 시각</label>
+    <input id="depTime" type="time" value="14:11">
+    <button class="chip" id="btnNow" aria-pressed="false">지금</button>
+    <button class="chip" id="btnDemo" aria-pressed="true">발표 시나리오 14:11</button>
+  </div>
+
+  <p class="hint" id="hint"></p>
+  <div class="legend" id="legend"></div>
+  <div class="routes" id="routes"></div>
+  <p class="note">추천은 버스+지하철 요금 안에서 가장 빨리 도착하는 경로예요. 전 구간 타슈는 반납 후 도보가 빠져 있어 실제로는 더 걸려요.</p>
+
+  <details class="settings" id="settings">
+    <summary>계산 기준값 (실측하면 여기서 수정)</summary>
+    <div id="fields"></div>
+    <button class="chip reset" id="btnReset">처음 값으로 되돌리기</button>
+  </details>
+</div>
+
+<script>
+(function(){
+const SEG={walk:'도보',wait:'대기',ride:'버스·택시·타슈',dock:'타슈 대여·반납',sub:'지하철'};
+// 기본값: 14:11 출발 시 발표 자료(A 15:03 · B 14:39 · C 15:09 · D 14:53 · E 14:53)와 같게 맞춤
+const DEFAULTS={
+  bufferMin:1, busAnchor:'14:24', busHeadway:15, busWalk:4, busRide:5, busToPlatform:10,
+  subAnchor:'14:35', subHeadway:10, subRide:18,
+  tWalk:5, tDock:1, tToHub:9, tHubWalk:3, tToDest:51,
+  taxiWait:4, taxiToDest:24, taxiToHub:7, taxiHubWalk:3,
+  fareBusSub:1550, fareTaxiDest:15520, fareTaxiHub:5480
+};
+const GROUPS=[
+  ['공통',[['bufferMin','탑승 최소 여유(분)']]],
+  ['108번 버스',[['busAnchor','기준 도착 시각','time'],['busHeadway','배차간격(분)'],['busWalk','정류장까지 도보(분)'],['busRide','승차 시간(분)'],['busToPlatform','하차→승강장(분)']]],
+  ['지하철 (월평역 → 대전역)',[['subAnchor','기준 출발 시각','time'],['subHeadway','배차간격(분)'],['subRide','승차 시간(분)']]],
+  ['타슈',[['tWalk','대여소까지 도보(분)'],['tDock','대여·반납 각(분)'],['tToHub','월평역까지 주행(분)'],['tHubWalk','반납→승강장(분)'],['tToDest','대전역까지 주행(분)']]],
+  ['택시',[['taxiWait','호출·대기(분)'],['taxiToDest','대전역까지(분)'],['taxiToHub','월평역까지(분)'],['taxiHubWalk','하차→승강장(분)']]],
+  ['요금(원)',[['fareBusSub','버스+지하철'],['fareTaxiDest','택시 대전역까지'],['fareTaxiHub','택시 월평역까지']]]
+];
+const KEY='cnu-route-offline-v1';
+let P={...DEFAULTS};
+try{const s=JSON.parse(localStorage.getItem(KEY)||'null');if(s)P={...DEFAULTS,...s};}catch(e){}
+const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(P));}catch(e){}};
+
+const $=s=>document.querySelector(s);
+const won=n=>Math.round(n).toLocaleString('ko-KR')+'원';
+const pad=n=>String(n).padStart(2,'0');
+const toMin=t=>{const[a,b]=t.split(':').map(Number);return a*60+b;};
+const clock=m=>{m=((Math.round(m)%1440)+1440)%1440;return pad(Math.floor(m/60))+':'+pad(m%60);};
+function h(tag,attrs,...kids){const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs||{})){if(v==null||v===false)continue;if(k.startsWith('on'))e.addEventListener(k.slice(2),v);else if(k==='class')e.className=v;else e.setAttribute(k,v===true?'':v);}for(const c of kids.flat())if(c!=null&&c!==false)e.append(c.nodeType?c:document.createTextNode(c));return e;}
+
+// 기준 시각 + 간격으로 만든 시간표에서 t 이후 첫 출발까지 기다리는 시간
+// 정류장·승강장에 도착한 뒤 최소 여유(bufferMin) 이후에 오는 차만 탈 수 있다고 봄
+function waitFor(t,anchor,headway){const a=toMin(anchor),hw=Math.max(1,+headway),tb=t+(+P.bufferMin||0);const next=a+Math.ceil((tb-a)/hw-1e-9)*hw;return next-t;}
+
+function build(key,name,sub,dep,segs,fare,opts={}){
+  let t=dep;const steps=segs.map(s=>{const start=t;t+=s.min;return{...s,start};});
+  return{key,name,sub,steps,fare,arrive:t,total:t-dep,...opts};
+}
+function compute(dep){
+  const out=[];
+  // A 버스 + 지하철
+  const bw=waitFor(dep+P.busWalk,P.busAnchor,P.busHeadway);
+  const aHead=[{type:'walk',min:+P.busWalk,label:'정류장까지 도보'},{type:'wait',min:bw,label:'108번 버스 대기',note:`${P.busHeadway}분 간격 가정`},
+    {type:'ride',min:+P.busRide,label:'108번 버스',note:'월평역 인근 하차'},{type:'walk',min:+P.busToPlatform,label:'승강장까지 도보·역내 이동'}];
+  out.push(build('A','버스 + 지하철','108번 → 월평역 → 지하철',dep,[...aHead,...subTail(dep,aHead)],+P.fareBusSub,{base:true}));
+  // B 택시
+  out.push(build('B','전 구간 택시','공대 3호관 → 대전역',dep,[{type:'wait',min:+P.taxiWait,label:'택시 호출·대기'},{type:'ride',min:+P.taxiToDest,label:'택시 주행'}],+P.fareTaxiDest));
+  // D 타슈 + 지하철
+  const dHead=[{type:'walk',min:+P.tWalk,label:'타슈 대여소까지 도보'},{type:'dock',min:+P.tDock,label:'타슈 대여'},{type:'ride',min:+P.tToHub,label:'타슈 주행',note:'월평역 인근 대여소까지'},
+    {type:'dock',min:+P.tDock,label:'타슈 반납'},{type:'walk',min:+P.tHubWalk,label:'승강장까지 도보·역내 이동'}];
+  out.push(build('D','타슈 + 지하철','타슈 → 월평역 → 지하철',dep,[...dHead,...subTail(dep,dHead)],+P.fareBusSub));
+  // E 택시 + 지하철
+  const eHead=[{type:'wait',min:+P.taxiWait,label:'택시 호출·대기'},{type:'ride',min:+P.taxiToHub,label:'택시 주행',note:'월평역까지'},{type:'walk',min:+P.taxiHubWalk,label:'승강장까지 도보·역내 이동'}];
+  out.push(build('E','택시 + 지하철','택시 → 월평역 → 지하철',dep,[...eHead,...subTail(dep,eHead)],+P.fareTaxiHub+ +P.fareBusSub));
+  // C 전 구간 타슈
+  out.push(build('C','전 구간 타슈','60분 내 반납 시 무료',dep,[{type:'walk',min:+P.tWalk,label:'타슈 대여소까지 도보'},{type:'dock',min:+P.tDock,label:'타슈 대여'},
+    {type:'ride',min:+P.tToDest,label:'타슈 주행',note:'대전역 인근 대여소까지'},{type:'dock',min:+P.tDock,label:'타슈 반납',note:'반납 후 도보 미포함'}],0,{plus:true}));
+  return out;
+}
+function subTail(dep,head){
+  const t=dep+head.reduce((a,s)=>a+s.min,0);const w=waitFor(t,P.subAnchor,P.subHeadway);
+  return[{type:'wait',min:w,label:'열차 대기',note:`${clock(t+w)} 월평역 출발 (${P.subHeadway}분 간격 가정)`},{type:'sub',min:+P.subRide,label:'지하철 1호선',note:'월평역 → 대전역'}];
+}
+
+function card(r,base,bestKey,maxMin){
+  const dmin=Math.round(r.arrive-base.arrive),extra=r.fare-base.fare,pills=[];
+  if(!r.base){
+    pills.push(h('span',{class:'pill '+(dmin<0?'good':dmin>0?'bad':'')},dmin===0?'버스+지하철과 같은 시각':`버스+지하철보다 ${Math.abs(dmin)}분 ${dmin<0?'일찍':'늦게'}${r.plus&&dmin>0?' 이상':''}`));
+    pills.push(h('span',{class:'pill '+(extra>0?'bad':extra<0?'good':'')},extra===0?'추가 요금 없음':(extra>0?'+':'')+won(extra)));
+  }
+  const waitSum=r.steps.filter(s=>s.type==='wait').reduce((a,s)=>a+s.min,0);
+  pills.push(h('span',{class:'pill'},`기다림 ${Math.round(waitSum)}분`));
+  const segs=h('div',{class:'segs'});
+  r.steps.forEach(s=>segs.append(h('i',{style:`flex:${Math.max(s.min,.2)} 1 0;background:var(--${s.type})`,title:`${SEG[s.type]} ${Math.round(s.min)}분`})));
+  const tl=h('ol',{class:'tl'});
+  r.steps.forEach(s=>tl.append(h('li',null,h('time',null,clock(s.start)),h('div',{class:'rail'},h('b',{style:`background:var(--${s.type})`}),h('s',{style:`background:var(--${s.type})`})),
+    h('div',{class:'w'},h('b',null,s.label),h('span',null,`${Math.round(s.min)}분${s.note?' · '+s.note:''}`)))));
+  tl.append(h('li',null,h('time',null,clock(r.arrive)),h('div',{class:'rail'},h('b',{style:'background:var(--ink)'})),h('div',{class:'w'},h('b',null,'대전역 도착'),h('span',null,`총 ${Math.round(r.total)}분 · ${won(r.fare)}`))));
+  const det=h('details',{open:openSet.has(r.key),ontoggle:e=>{e.target.open?openSet.add(r.key):openSet.delete(r.key);}},h('summary',null,'단계별 시각 보기'),tl);
+  return h('article',{class:'route'+(r.base?' base':'')+(r.key===bestKey?' best':'')},
+    h('div',{class:'rh'},h('span',{class:'letter'},r.key),h('div',{class:'rn'},r.name,h('small',null,r.sub)),
+      r.base?h('span',{class:'tag base'},'기준'):null,r.key===bestKey?h('span',{class:'tag best'},'추천'):null),
+    h('div',{class:'nums'},h('span',{class:'arr'},clock(r.arrive)+(r.plus?'+':''),h('small',null,'도착')),h('span',{class:'mins'},`${Math.round(r.total)}분${r.plus?'+':''}`),h('span',{class:'fare'},won(r.fare))),
+    h('div',{class:'track',style:`width:${Math.min(100,r.total/maxMin*100)}%`},segs),
+    h('div',{class:'pills'},pills),det);
+}
+const openSet=new Set();
+let useNow=false;
+function depMin(){if(useNow){const d=new Date();return d.getHours()*60+d.getMinutes();}return toMin($('#depTime').value||'14:11');}
+function render(){
+  const dep=depMin();if(useNow)$('#depTime').value=clock(dep);
+  const list=compute(dep),base=list.find(r=>r.base);
+  const best=list.filter(r=>r.fare<=base.fare&&!r.plus).sort((a,b)=>a.arrive-b.arrive||(a.base?-1:1))[0];
+  const maxMin=Math.max(60,...list.map(r=>r.total));
+  $('#hint').textContent=`${clock(dep)} 출발 · 도착이 빠른 순 (기준 경로는 맨 위)`;
+  $('#routes').replaceChildren(card(base,base,best.key,maxMin),...list.filter(r=>!r.base).sort((a,b)=>a.arrive-b.arrive).map(r=>card(r,base,best.key,maxMin)));
+  $('#btnNow').setAttribute('aria-pressed',String(useNow));
+  $('#btnDemo').setAttribute('aria-pressed',String(!useNow&&$('#depTime').value==='14:11'));
+}
+function renderFields(){
+  const box=$('#fields');box.replaceChildren();
+  for(const[title,fs]of GROUPS){
+    box.append(h('div',{class:'grp'},h('h3',null,title),h('div',{class:'fields'},fs.map(([k,label,type])=>h('label',{class:'f'},label,
+      h('input',{id:'p-'+k,type:type||'number',min:type?null:'0',step:type?null:'1',value:P[k],class:String(P[k])!==String(DEFAULTS[k])?'changed':null,
+        oninput:e=>{const v=e.target.value;if(v==='')return;P[k]=type?v:Number(v);e.target.classList.toggle('changed',String(P[k])!==String(DEFAULTS[k]));save();render();}}))))));
+  }
+}
+$('#legend').append(...Object.keys(SEG).map(k=>h('span',null,h('i',{style:`background:var(--${k})`}),SEG[k])));
+$('#depTime').addEventListener('input',()=>{useNow=false;render();});
+$('#btnNow').addEventListener('click',()=>{useNow=true;render();});
+$('#btnDemo').addEventListener('click',()=>{useNow=false;$('#depTime').value='14:11';render();});
+$('#btnReset').addEventListener('click',()=>{P={...DEFAULTS};save();renderFields();render();});
+setInterval(()=>{if(useNow)render();},20000);
+renderFields();render();
+})();
+</script>

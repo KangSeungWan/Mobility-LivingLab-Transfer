@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>통학길 비교 · 대전</title>
+<meta name="description" content="실시간 버스 도착정보로 버스·지하철·타슈·택시 복합경로의 도착 시각을 비교합니다.">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+  <section class="mapwrap">
+    <div id="map" class="map" aria-label="지도"></div>
+    <div class="map-tools">
+      <div class="pickmode" role="group" aria-label="지도를 눌러 지정할 위치">
+        <button id="pickOrigin" class="pm on" aria-pressed="true"><i class="dot o"></i>출발 지정</button>
+        <button id="pickDest" class="pm" aria-pressed="false"><i class="dot d"></i>도착 지정</button>
+      </div>
+      <button id="myLoc" class="pm" title="현재 위치를 출발지로">◎ 내 위치</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <header class="ph">
+      <div class="brand"><b>통학길 비교</b><span>대전 · 실시간</span></div>
+      <button id="refresh" class="icon" title="새로고침" aria-label="실시간 정보 새로고침">↻</button>
+    </header>
+    <div id="banner" class="banner" hidden></div>
+
+    <form id="searchForm" class="search" autocomplete="off">
+      <input id="q" type="search" placeholder="장소 검색 (예: 충남대 공과대학 3호관)" aria-label="장소 검색">
+      <button type="submit">검색</button>
+    </form>
+    <ul id="results" class="results" hidden></ul>
+
+    <div class="trip">
+      <div class="tp"><i class="dot o"></i><div><span>출발</span><b id="oName">-</b></div></div>
+      <button id="swap" class="icon sm" title="출발·도착 바꾸기" aria-label="출발과 도착 바꾸기">⇅</button>
+      <div class="tp"><i class="dot d"></i><div><span>도착</span><b id="dName">-</b></div></div>
+    </div>
+
+    <nav class="tabs" role="tablist">
+      <button id="tabCompare" role="tab" class="tab on" aria-selected="true">경로 비교</button>
+      <button id="tabStops" role="tab" class="tab" aria-selected="false">주변 정류장 실시간</button>
+    </nav>
+
+    <div id="content" class="content"></div>
+    <p class="updated" id="updated"></p>
+    <p class="updated"><a href="health.html">API 점검</a></p>
+  </section>
+</div>
+<script src="scenario.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
