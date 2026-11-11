@@ -28,9 +28,11 @@ window.SCENARIO = {
     fallbackWaitMin: 9,        // 근처에서 108번 도착정보를 못 찾았을 때 가정 대기
   },
   subway: {
-    // 시간표 API 연동 전: 월평역 → 대전역 방면 열차를 '기준 시각 + 간격'으로 가정
+    // 대전교통공사 열차시각표로 계산 (역번호: 월평 114, 대전역 104 · 방향 0=판암 방면 · 요일 0=평일 1=휴일)
+    stNum: '114', destStNum: '104', dir: '0', dayWeekday: '0', dayHoliday: '1',
+    // 시각표를 못 불러올 때만 쓰는 가정값
     anchor: '14:35', headwayMin: 10,
-    rideMin: 18,               // 월평역 → 대전역
+    rideMin: 19,               // 월평역 → 대전역 (시각표 확인값 19분 · 시각표에서 계산되면 그 값을 사용)
   },
   tashu: { walkMin: 5, dockMin: 1, toHubMin: 9, toDestMin: 51, hubWalkMin: 3, fare: 0 },
   taxi: {

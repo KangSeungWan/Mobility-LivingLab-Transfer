@@ -33,6 +33,17 @@ async function fetchText(url, headers = {}) {
   } finally { clearTimeout(timer); }
 }
 
+// TAGO가 '가용한 세션이 존재하지 않습니다(99)'나 HTTP 500을 줄 때가 있어 잠깐 쉬고 최대 2번 더 시도
+async function fetchTago(url) {
+  for (let i = 0; ; i++) {
+    let t;
+    try { t = await fetchText(url); }
+    catch (e) { if (i >= 2 || !/\(5\d\d\)|시간 초과/.test(e.message)) throw e; } // 포털 일시 오류(500 APPLICATION_ERROR 등)도 재시도
+    if (t !== undefined && (i >= 2 || !/"resultCode"\s*:\s*"?99\b/.test(t))) return t;
+    await new Promise((r) => setTimeout(r, 700 * (i + 1)));
+  }
+}
+
 function dataGoUrl(base, params) {
   const u = new URL(base);
   u.searchParams.set('serviceKey', env('DATA_GO_KR_KEY')); // 공공데이터포털 '일반 인증키(Decoding)' 값
@@ -58,6 +69,7 @@ function tagoItems(text) {
 // 공공데이터포털 공통 오류 코드를 우리말로
 const ERR_HELP = {
   SERVICE_KEY_IS_NOT_REGISTERED_ERROR: '이 키로 활용신청이 안 된 API예요 (승인 직후면 1~2시간 뒤 다시 시도)',
+  LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR: '오늘 호출 한도를 넘었어요 (내일 다시 시도)',
   SERVICE_ACCESS_DENIED_ERROR: '접근이 거부됐어요 (활용신청 상태 확인)',
   LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR: '오늘 호출 한도를 넘었어요',
   DEADLINE_HAS_EXPIRED_ERROR: '활용기간이 끝났어요',
@@ -82,7 +94,7 @@ async function nearbyStops(q) {
   if (isMock()) return { mock: true, stops: mockStops(lat, lng) };
   const key = `stops:${lat.toFixed(4)},${lng.toFixed(4)}`;
   const stops = await cached(key, 24 * 3600e3, async () => {
-    const text = await fetchText(dataGoUrl('https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList',
+    const text = await fetchTago(dataGoUrl('https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList',
       { gpsLati: lat, gpsLong: lng, numOfRows: 40, pageNo: 1, _type: 'json' }));
     return tagoItems(text).map((it) => ({
       id: String(it.nodeid), name: String(it.nodenm), lat: Number(it.gpslati), lng: Number(it.gpslong),
@@ -98,7 +110,7 @@ async function arrivals(q) {
   if (!/^[A-Za-z0-9_-]{3,30}$/.test(nodeId)) throw new ApiError(400, 'nodeId 값이 올바르지 않습니다');
   if (isMock()) return { mock: true, source: 'mock', nodeId, at: Date.now(), list: mockArrivals(nodeId) };
   return cached(`arr:${nodeId}`, 20e3, async () => {
-    const text = await fetchText(dataGoUrl('https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList',
+    const text = await fetchTago(dataGoUrl('https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList',
       { cityCode: DAEJEON_CITY_CODE, nodeId, numOfRows: 60, pageNo: 1, _type: 'json' }));
     const list = tagoItems(text).map((it) => ({
       routeNo: String(it.routeno), routeId: String(it.routeid || ''), routeType: it.routetp || '',
@@ -137,6 +149,40 @@ async function arrivalsDaejeon(q) {
     }).filter((a) => a.routeNo && Number.isFinite(a.arrSec)).sort((a, b) => a.arrSec - b.arrSec);
     return { mock: false, source: 'daejeon', arsId, at: Date.now(), list };
   });
+}
+
+/* ---------- 3-1. 대전도시철도 열차시각표 (대전교통공사 TimeTableSVC · 전체 역을 한 번에 받아 12시간 캐시) ---------- */
+// dayType 0=평일 1=휴일 · drctType 0=판암 방면 1=반석 방면 · stNum 101(판암)~122(반석), 월평 114, 대전역 104
+const SUBWAY_URL = () => env('DJ_SUBWAY_URL') || 'https://apis.data.go.kr/B554695/TimeTableSVC/getAllTimeTable';
+function parseTimetable(xml) {
+  if (/<returnAuthMsg>|<errMsg>/.test(xml) && !/<returnAuthMsg>\s*NORMAL/i.test(xml)) throw new ApiError(502, '열차시각표 API 오류: ' + explainXmlError(xml));
+  const map = {};
+  for (const b of xmlBlocks(xml)) {
+    const k = `${xmlField(b, 'dayType')}|${xmlField(b, 'drctType')}|${xmlField(b, 'stNum')}`;
+    let hr = Number(xmlField(b, 'tmZone')); if (hr < 4) hr += 24;  // 자정 넘은 막차
+    for (const m of xmlField(b, 'tmList').split(/\s+/).filter(Boolean)) (map[k] = map[k] || []).push(hr * 60 + Number(m));
+  }
+  for (const k in map) map[k].sort((a, b) => a - b);
+  if (!Object.keys(map).length) throw new ApiError(502, '열차시각표 응답에 시각이 없습니다');
+  return map;
+}
+// 두 역 시각표에서 가장 많이 맞아떨어지는 시간 차(분) = 같은 열차의 역간 소요시간. 양수면 from → to 방향
+function bestOffset(a, b) {
+  const set = new Set(b); let best = { min: null, hits: 0 };
+  for (let k = -45; k <= 45; k++) { if (!k) continue; let n = 0; for (const x of a) if (set.has(x + k)) n++; if (n > best.hits) best = { min: k, hits: n }; }
+  return best;
+}
+async function subway(q) {
+  const from = String(q.from || '114'), to = String(q.to || '104');
+  if (!/^\d{3}$/.test(from) || !/^\d{3}$/.test(to)) throw new ApiError(400, '역번호 값이 올바르지 않습니다');
+  if (isMock()) return { mock: true };
+  const all = await cached('subway:all', 12 * 3600e3, async () => parseTimetable(await fetchText(dataGoUrl(SUBWAY_URL(), { numOfRows: 3000, pageNo: 1 }))));
+  const days = {};
+  for (const d of ['0', '1']) { days[d] = {}; for (const dir of ['0', '1']) {
+    const a = all[`${d}|${dir}|${from}`] || [], b = all[`${d}|${dir}|${to}`] || [], o = bestOffset(a, b);
+    days[d][dir] = { from: a, ride: o.min > 0 && o.hits >= 5 ? o.min : null };
+  } }
+  return { mock: false, from, to, days };
 }
 
 /* ---------- 3. 자동차(택시) 이동시간·요금 (카카오모빌리티 길찾기, 선택) ---------- */
@@ -303,7 +349,7 @@ async function health(q) {
   // 3-1) 108번 타는 정류장 찾기 — 근처 대전 정류장마다 도착정보를 조회해 노선·행선지를 모읍니다
   try {
     const route = String(q.route || '108');
-    const t = await fetchText(dataGoUrl('https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList', { gpsLati: lat, gpsLong: lng, numOfRows: 40, pageNo: 1, _type: 'json' }));
+    const t = await fetchTago(dataGoUrl('https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getCrdntPrxmtSttnList', { gpsLati: lat, gpsLong: lng, numOfRows: 40, pageNo: 1, _type: 'json' }));
     const seen = new Set();
     const stops = tagoItems(t).filter((x) => String(x.citycode) === DAEJEON_CITY_CODE && !seen.has(x.nodeid) && seen.add(x.nodeid))
       .map((x) => ({ nodeId: String(x.nodeid), arsId: String(x.nodeno || ''), name: String(x.nodenm), lat: Number(x.gpslati), lng: Number(x.gpslong), m: Math.round(meters({ lat, lng }, { lat: Number(x.gpslati), lng: Number(x.gpslong) })) }))
@@ -321,7 +367,7 @@ async function health(q) {
         }
       } catch (e) { r.err = e.message; }
       try {
-        const tt = await fetchText(dataGoUrl('https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList', { cityCode: DAEJEON_CITY_CODE, nodeId: sp.nodeId, numOfRows: 60, pageNo: 1, _type: 'json' }));
+        const tt = await fetchTago(dataGoUrl('https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList', { cityCode: DAEJEON_CITY_CODE, nodeId: sp.nodeId, numOfRows: 60, pageNo: 1, _type: 'json' }));
         const items = tagoItems(tt); r.tagoCnt = items.length;
         for (const it of items) { const no = String(it.routeno); if (!r.routes.includes(no)) r.routes.push(no); if (no === route) r.hit.push(`TAGO ${Math.round(Number(it.arrtime) / 60)}분 후`); }
       } catch (e) { r.err = (r.err ? r.err + ' / ' : '') + e.message; }
@@ -366,6 +412,18 @@ async function health(q) {
     }));
   }
 
+  // 5-0) 대전교통공사 열차시각표 — 방향 검증: 월평(114) 14시대 첫 열차가 대전역(104)에 몇 분 뒤 도착하는지
+  checks.push(await check('대전교통공사 열차시각표', dataGoUrl(SUBWAY_URL(), { numOfRows: 3000, pageNo: 1 }), {}, (r) => {
+    if (r.http !== 200) return { ok: false, message: `HTTP ${r.http} — 열차시각표 활용신청 여부와 주소를 확인하세요` };
+    const map = parseTimetable(r.text);
+    const parts = [];
+    for (const [d, dn] of [['0', '평일'], ['1', '휴일']]) for (const [dir, nm] of [['0', '판암 방면'], ['1', '반석 방면']]) {
+      const o = bestOffset(map[`${d}|${dir}|114`] || [], map[`${d}|${dir}|104`] || []);
+      parts.push(`${dn} ${nm}(${dir}): 월평→대전역 ${o.min == null ? '-' : (o.min > 0 ? '+' : '') + o.min + '분'} (일치 ${o.hits}편)`);
+    }
+    return { ok: true, message: `정상 · ${Object.keys(map).length}개 (요일·방향·역) · ` + parts.join(' / ') };
+  }));
+
   // 5) 지하철 시각표 — 공공데이터포털 '미리보기'의 요청 주소를 그대로 넣어 응답 형식 확인
   if (keys.DJ_SUBWAY_TEST_URL) {
     const u = new URL(env('DJ_SUBWAY_TEST_URL'));
@@ -392,4 +450,4 @@ function handler(fn) {
   };
 }
 
-module.exports = { nearbyStops, arrivals, arrivalsDaejeon, drive, config, search, tashu, health, handler, ApiError };
+module.exports = { nearbyStops, arrivals, arrivalsDaejeon, subway, drive, config, search, tashu, health, handler, ApiError };

@@ -55,7 +55,8 @@ npm start        # → http://localhost:3000
 
 ## 실시간 / 가정값 구분
 - **실시간**: 버스 도착(TAGO 또는 대전시), 타슈 대여소 자전거 수·도보 거리, 택시(카카오 길찾기 권한이 있을 때)
-- **가정값** (`scenario.js`에서 수정): 지하철 배차(시각표 연결 전), 도보·타슈·역내 이동, 버스를 놓쳤을 때 다음 차 간격, 탑승 최소 여유 1분
+- **시각표**: 지하철 대기·소요시간 (대전교통공사 열차시각표, 평일·휴일 구분)
+- **가정값** (`scenario.js`에서 수정): 도보·타슈·역내 이동, 버스를 놓쳤을 때 다음 차 간격, 탑승 최소 여유 1분
 - 화면의 각 단계에 '실시간' 표시가 붙어 구분됩니다.
 
 ## 키가 없을 때
@@ -63,7 +64,7 @@ npm start        # → http://localhost:3000
 
 ## 폴더 구조
 ```
-api/          서버 함수 (stops, arrivals, arrivals-dj, drive, search, tashu, config, health)
+api/          서버 함수 (stops, arrivals, arrivals-dj, subway, drive, search, tashu, config, health)
 lib/core.js   공공데이터·카카오 호출, 오류 해석, 예시 데이터
 public/       웹페이지 (index.html, app.js, style.css, scenario.js, health.html)
 server.js     로컬 실행용 서버

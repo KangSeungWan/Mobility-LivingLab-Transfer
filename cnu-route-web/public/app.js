@@ -157,6 +157,10 @@ async function loadArrivals() {
   drawStops();
   render();
 }
+async function loadSubway() {
+  try { st.subway = await api('/api/subway', { from: SC.subway.stNum, to: SC.subway.destStNum }); }
+  catch (e) { st.subway = null; console.warn('열차시각표:', e.message); }
+}
 async function loadTashu() {
   if (!st.cfg.tashu && !st.cfg.mock) { st.tashu = null; return; }
   try { st.tashu = await api('/api/tashu', { lat: st.origin.lat.toFixed(6), lng: st.origin.lng.toFixed(6) }); st.tashuErr = null; }
@@ -172,13 +176,28 @@ async function loadDrives() {
 }
 
 /* ---------------- 경로 계산 ---------------- */
-function subwayWait(platformMs) {
+// 승강장 도착 시각(ms) → 탈 열차. 시각표가 있으면 대전교통공사 시각표, 없으면 '기준 시각 + 간격' 가정
+function subwayNext(platformMs) {
+  const d = new Date(platformMs);
+  let t = d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60;
+  if (t < 240) t += 1440;                      // 자정 이후는 전날 시각표의 24시대
+  const tb = t + (SC.bufferMin || 0);          // 승강장 도착 후 최소 여유 이후 열차만 탑승
+  const tt = st.subway && !st.subway.mock && st.subway.days;
+  if (tt) {
+    const wd = new Date(platformMs - (t >= 1440 ? 86400000 : 0)).getDay();
+    const day = wd === 0 || wd === 6 ? SC.subway.dayHoliday : SC.subway.dayWeekday;
+    const set = tt[day] && tt[day][SC.subway.dir];
+    if (set && set.from.length) {
+      const dep = set.from.find((x) => x >= tb - 1e-9);
+      if (dep == null) return { wait: 0, ride: SC.subway.rideMin, dep: null, table: true, ended: true };
+      const fromTable = !!set.ride;
+      return { wait: dep - t, ride: fromTable ? set.ride : SC.subway.rideMin, dep, table: true, rideTable: fromTable, holiday: day === SC.subway.dayHoliday };
+    }
+  }
   const [ah, am] = SC.subway.anchor.split(':').map(Number);
-  const d = new Date(platformMs); const t = d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60;
   const a = ah * 60 + am, hw = SC.subway.headwayMin;
-  const tb = t + (SC.bufferMin || 0); // 승강장 도착 후 최소 여유 이후 열차만 탑승
   const next = a + Math.ceil((tb - a) / hw - 1e-9) * hw;
-  return next - t;
+  return { wait: next - t, ride: SC.subway.rideMin, dep: next, table: false };
 }
 function findBus() {
   const ids = SC.bus.stopIds;
@@ -203,12 +222,15 @@ function build(key, name, sub, segs, fare, opts = {}) {
 }
 function computeRoutes() {
   const now = Date.now(), list = [];
-  const sw = (ms) => subwayWait(ms);
   const subwayTail = (startMs, before) => {
     const used = before.reduce((a, s) => a + s.min, 0);
-    const w = sw(startMs + used * 60000);
-    return [{ type: 'wait', min: w, label: '열차 대기', note: `${SC.hub.name} 출발 ${clock(startMs + (used + w) * 60000)} 열차 (간격 ${SC.subway.headwayMin}분 가정)` },
-      { type: 'sub', min: SC.subway.rideMin, label: '지하철 1호선', note: `${SC.hub.name} → ${SC.dest.name}` }];
+    const n = subwayNext(startMs + used * 60000);
+    const depClock = clock(startMs + (used + n.wait) * 60000);
+    const waitNote = n.ended ? '시각표상 오늘 열차 운행이 끝났어요'
+      : n.table ? `${SC.hub.name} ${depClock} 출발 · ${n.holiday ? '휴일' : '평일'} 시각표`
+      : `${SC.hub.name} 출발 ${depClock} 열차 (간격 ${SC.subway.headwayMin}분 가정)`;
+    return [{ type: 'wait', min: n.wait, label: '열차 대기', note: waitNote },
+      { type: 'sub', min: n.ride, label: '지하철 1호선', note: `${SC.hub.name} → ${SC.dest.name}${n.rideTable ? ' · 시각표 기준' : ''}` }];
   };
 
   // A 버스 + 지하철 (버스 대기 = 실시간)
@@ -322,7 +344,7 @@ function renderCompare(c) {
     h('p', { class: 'note' }, bus
       ? `${SC.bus.routeNo}번 실시간 정보: ${bus.stop.name} (${bus.stop.fixed ? '번호 ' + bus.stop.arsId : bus.stop.id})${SC.bus.stopIds.length || bus.stop.fixed ? '' : ' · 방향 미지정 — scenario.js의 stopIds에 월평역 방면 정류장 ID를 넣으세요'}`
       : `근처 정류장에서 ${SC.bus.routeNo}번 도착정보를 찾지 못해 버스 대기는 가정값입니다.`),
-    h('p', { class: 'note' }, `지하철은 시간표 API 연동 전이라 ${SC.subway.anchor} 기준 ${SC.subway.headwayMin}분 간격으로 가정했습니다. 도보·타슈·역내 이동은 실측 전 고정값입니다.${st.cfg.drive ? '' : ' 택시는 고정값입니다.'}`));
+    h('p', { class: 'note' }, `${st.subway && st.subway.days ? '지하철은 대전교통공사 열차시각표(평일·휴일) 기준입니다. 공휴일은 평일 시각표로 계산돼요.' : `지하철 시각표를 불러오지 못해 ${SC.subway.anchor} 기준 ${SC.subway.headwayMin}분 간격으로 가정했습니다.`} 도보·타슈·역내 이동은 실측 전 고정값입니다.${st.cfg.drive ? '' : ' 택시는 고정값입니다.'}`));
 }
 function renderStops(c) {
   if (st.tashu && st.tashu.stations.length) {
@@ -397,6 +419,7 @@ async function start() {
   if (st.cfg.mock) { const b = $('#banner'); b.hidden = false; b.textContent = '예시 데이터로 실행 중이에요. .env에 공공데이터 키(DATA_GO_KR_KEY)를 넣으면 실제 버스 도착정보가 나옵니다.'; }
 
   initMap();
+  loadSubway().then(render);
   await loadStops();
   setInterval(() => { if (document.visibilityState === 'visible') loadArrivals(); }, REFRESH_MS);
   setInterval(() => { if (document.visibilityState === 'visible') render(); }, 10000);
