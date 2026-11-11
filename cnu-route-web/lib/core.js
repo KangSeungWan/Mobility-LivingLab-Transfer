@@ -313,7 +313,9 @@ async function health(q) {
       try {
         const xml = sp.arsId ? await fetchText(dataGoUrl(env('DJ_ARRIVAL_URL') || 'https://apis.data.go.kr/6300000/arrive/getArrInfoByUid', { arsId: sp.arsId })) : '';
         for (const b of xmlBlocks(xml)) {
-          const no = xmlField(b, 'ROUTE_NO'), dest = xmlField(b, 'DESTINATION'), min = xmlField(b, 'EXTIME_MIN');
+          // EXTIME_MIN은 차고지 대기 등에서 틀린 값이 와서(1분 vs SEC 2010초) 초 단위를 우선 사용
+          const no = xmlField(b, 'ROUTE_NO'), dest = xmlField(b, 'DESTINATION'), sec = Number(xmlField(b, 'EXTIME_SEC'));
+          const min = Number.isFinite(sec) && sec > 0 ? Math.round(sec / 60) : xmlField(b, 'EXTIME_MIN');
           r.routes.push(no);
           if (no === route) r.hit.push(`${dest} 방면 ${min}분 후`);
         }
