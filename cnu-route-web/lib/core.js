@@ -82,6 +82,11 @@ function explainXmlError(t) {
   return ERR_HELP[msg] ? `${ERR_HELP[msg]} [${msg}]` : msg;
 }
 
+// 대전 주변만 허용 (배포 시 남의 위치·경로 조회에 키가 쓰이지 않게)
+const DJ_BOX = { s: 36.10, n: 36.60, w: 127.15, e: 127.65 };
+function inDaejeon(lat, lng, what = '위치') {
+  if (lat < DJ_BOX.s || lat > DJ_BOX.n || lng < DJ_BOX.w || lng > DJ_BOX.e) throw new ApiError(400, `${what}가 대전 지역 밖이에요`);
+}
 function num(v, name) {
   const n = Number(v);
   if (v === undefined || v === '' || !Number.isFinite(n)) throw new ApiError(400, `${name} 값이 필요합니다`);
@@ -91,6 +96,7 @@ function num(v, name) {
 /* ---------- 1. 좌표 근처 정류장 (TAGO 버스정류소정보 · 반경 약 500m) ---------- */
 async function nearbyStops(q) {
   const lat = num(q.lat, 'lat'), lng = num(q.lng, 'lng');
+  inDaejeon(lat, lng);
   if (isMock()) return { mock: true, stops: mockStops(lat, lng) };
   const key = `stops:${lat.toFixed(4)},${lng.toFixed(4)}`;
   const stops = await cached(key, 24 * 3600e3, async () => {
@@ -189,6 +195,7 @@ async function subway(q) {
 let driveBlockedUntil = 0;
 async function drive(q) {
   const o = [num(q.olat, 'olat'), num(q.olng, 'olng')], d = [num(q.dlat, 'dlat'), num(q.dlng, 'dlng')];
+  inDaejeon(o[0], o[1], '출발지'); inDaejeon(d[0], d[1], '도착지');
   if (!env('KAKAO_REST_KEY') || env('MOCK') === '1') throw new ApiError(501, '카카오 길찾기 키가 없어 고정값을 사용합니다');
   if (Date.now() < driveBlockedUntil) throw new ApiError(503, '카카오 길찾기를 쓸 수 없어 고정값을 사용합니다 (권한 확인)');
   const key = `drive:${o.map((v) => v.toFixed(3))}:${d.map((v) => v.toFixed(3))}`;
@@ -247,6 +254,7 @@ function meters(a, b) {
 }
 async function tashu(q) {
   const p = { lat: num(q.lat, 'lat'), lng: num(q.lng, 'lng') };
+  inDaejeon(p.lat, p.lng);
   const radius = Math.min(Number(q.radius) || 800, 2000);
   let all, mock = false;
   if (!env('TASHU_KEY') || env('MOCK') === '1') {
@@ -310,6 +318,8 @@ function tagoJudge(label) {
 }
 
 async function health(q) {
+  if (process.env.VERCEL && (!env('HEALTH_TOKEN') || String(q.token || '') !== env('HEALTH_TOKEN')))
+    throw new ApiError(404, '배포 환경에서는 API 점검이 꺼져 있어요 (HEALTH_TOKEN 필요)');
   const keys = { DATA_GO_KR_KEY: !!env('DATA_GO_KR_KEY'), KAKAO_JS_KEY: !!env('KAKAO_JS_KEY'), KAKAO_REST_KEY: !!env('KAKAO_REST_KEY'), TASHU_KEY: !!env('TASHU_KEY'),
     DJ_SUBWAY_TEST_URL: !!env('DJ_SUBWAY_TEST_URL'), MOCK: env('MOCK') === '1' };
   const checks = [];
@@ -434,18 +444,29 @@ async function health(q) {
 }
 
 /* ---------- Vercel·로컬 서버 공용 래퍼 ---------- */
-function handler(fn) {
+const HITS = new Map(); // IP별 1분 호출 수 (서버 인스턴스마다 따로 셈 · 과다 호출 방지용)
+function rateLimited(req, perMin) {
+  const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim() || '?';
+  const now = Date.now(), h = HITS.get(ip);
+  if (!h || now - h.t > 60e3) { HITS.set(ip, { t: now, n: 1 }); if (HITS.size > 5000) HITS.clear(); return false; }
+  return ++h.n > perMin;
+}
+// cacheSec: 성공 응답을 Vercel CDN에 그 시간만큼 저장 (같은 요청은 외부 API를 다시 부르지 않음)
+function handler(fn, { cacheSec = 0, perMin = 120 } = {}) {
   return async (req, res) => {
     const q = req.query || Object.fromEntries(new URL(req.url, 'http://local').searchParams);
     let status = 200, body;
-    try { body = await fn(q); } catch (e) {
-      status = e instanceof ApiError ? e.status : 500;
-      body = { error: e instanceof ApiError ? e.message : '서버 오류' };
-      if (!(e instanceof ApiError)) console.error(e);
+    if (rateLimited(req, perMin)) { status = 429; body = { error: '요청이 너무 많아요. 잠시 후 다시 시도하세요' }; }
+    else {
+      try { body = await fn(q); } catch (e) {
+        status = e instanceof ApiError ? e.status : 500;
+        body = { error: e instanceof ApiError ? e.message : '서버 오류' };
+        if (!(e instanceof ApiError)) console.error(e);
+      }
     }
     res.statusCode = status;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Cache-Control', status === 200 && cacheSec ? `public, max-age=0, s-maxage=${cacheSec}, stale-while-revalidate=${cacheSec}` : 'no-store');
     res.end(JSON.stringify(body));
   };
 }

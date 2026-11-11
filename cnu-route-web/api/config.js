@@ -1,2 +1,2 @@
 const { handler, config } = require('../lib/core');
-module.exports = handler(config);
+module.exports = handler(config, { cacheSec: 300 });

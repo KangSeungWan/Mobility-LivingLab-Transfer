@@ -1,2 +1,2 @@
 const { handler, tashu } = require('../lib/core');
-module.exports = handler(tashu);
+module.exports = handler(tashu, { cacheSec: 60 });

@@ -48,6 +48,7 @@ document.getElementById('run').onclick = async () => {
   const p = new URLSearchParams();
   const a = document.getElementById('arsId').value.trim(), n = document.getElementById('nodeId').value.trim();
   if (a) p.set('arsId', a); if (n) p.set('nodeId', n);
+  const tk = new URLSearchParams(location.search).get('token'); if (tk) p.set('token', tk); // 배포 환경: health.html?token=...
   try {
     const r = await fetch('/api/health?' + p); last = await r.json();
   } catch (e) { out.replaceChildren(el('p', 'err', '서버에 연결하지 못했어요: ' + e.message)); return; }

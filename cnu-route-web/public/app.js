@@ -415,6 +415,7 @@ async function start() {
       () => { const b = $('#banner'); b.hidden = false; b.textContent = '위치 권한이 없어 현재 위치를 가져오지 못했어요.'; }, { enableHighAccuracy: true, timeout: 8000 });
   };
 
+  if (['localhost', '127.0.0.1'].includes(location.hostname)) $('#healthLink').hidden = false; // 점검 링크는 내 PC에서만
   try { st.cfg = await api('/api/config'); } catch { /* 기본값 유지 */ }
   if (st.cfg.mock) { const b = $('#banner'); b.hidden = false; b.textContent = '예시 데이터로 실행 중이에요. .env에 공공데이터 키(DATA_GO_KR_KEY)를 넣으면 실제 버스 도착정보가 나옵니다.'; }
 
