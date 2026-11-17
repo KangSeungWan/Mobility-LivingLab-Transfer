@@ -15,6 +15,7 @@ const st = {
   driveCache: {}, searchCache: new Map(), // 이 브라우저 세션 안에서만 쓰는 임시 보관 (서버·다른 사용자와 공유하지 않음)
 };
 const $ = (s) => document.querySelector(s);
+const c4 = (v) => Number(v).toFixed(4); // 서버로 보내는 좌표는 소수 4자리(약 11m)까지만
 const won = (n) => Math.round(n).toLocaleString('ko-KR') + '원';
 const pad = (n) => String(n).padStart(2, '0');
 const clock = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
@@ -133,7 +134,7 @@ async function loadStops(refresh) {
   const gen = ++st.gen;
   st.stopsErr = null; st.stopsNote = null; st.loading = true; render();
   try {
-    const r = await api('/api/stops', { lat: st.origin.lat.toFixed(6), lng: st.origin.lng.toFixed(6) });
+    const r = await api('/api/stops', { lat: c4(st.origin.lat), lng: c4(st.origin.lng) });
     if (gen !== st.gen) return;                       // 그 사이 출발지가 또 바뀌었으면 이 결과는 버림
     st.stops = r.stops.map((s) => ({ ...s, d: dist(st.origin, s) })).filter((s) => s.d <= 600).sort((a, b) => a.d - b.d).slice(0, 8);
     drawStops();
@@ -181,7 +182,7 @@ async function loadTashu() {
   if (!st.cfg.tashu && !st.cfg.mock) { st.tashu = null; return; }
   const gen = st.gen;
   try {
-    const r = await api('/api/tashu', { lat: st.origin.lat.toFixed(6), lng: st.origin.lng.toFixed(6) });
+    const r = await api('/api/tashu', { lat: c4(st.origin.lat), lng: c4(st.origin.lng) });
     if (gen !== st.gen) return;
     st.tashu = r; st.tashuAt = Date.now(); st.tashuErr = null;
   }
@@ -198,7 +199,7 @@ async function loadDrives(force) {
     const hit = st.driveCache[key];
     if (!force && hit && Date.now() - hit.t < DRIVE_TTL_MS) { out[k] = hit; return; }
     try {
-      const v = await api('/api/drive', { olat: o.lat, olng: o.lng, dlat: d.lat, dlng: d.lng });
+      const v = await api('/api/drive', { olat: c4(o.lat), olng: c4(o.lng), dlat: c4(d.lat), dlng: c4(d.lng) });
       out[k] = st.driveCache[key] = { ...v, t: Date.now() };
     } catch { out[k] = null; }
   }));

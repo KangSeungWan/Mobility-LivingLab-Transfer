@@ -62,6 +62,8 @@ async function storeCmd(store, cmds) {
   } finally { clearTimeout(timer); }
 }
 async function reserve(name) {
+  // 예시 데이터 모드(MOCK=1)에서는 어떤 외부 API도 부르지 않습니다 (개발·테스트 중 실제 호출 방지)
+  if (env('MOCK') === '1') throw new ApiError(503, '예시 데이터 모드(MOCK=1)에서는 외부 API를 호출하지 않아요');
   const limit = quotaLimit(name), day = kstDay(), key = `caw:quota:${day}:${name}`;
   const over = new ApiError(429, '오늘 이 정보의 조회 한도에 도달해 외부 조회를 멈췄어요. 내일 다시 시도해 주세요');
   for (const k of QUOTA_LOCAL.keys()) if (!k.includes(day)) QUOTA_LOCAL.delete(k);
@@ -283,7 +285,7 @@ async function config() {
 async function search(q) {
   const query = String(q.q || '').trim().slice(0, 60);
   if (!query) throw new ApiError(400, '검색어가 필요합니다');
-  if (!env('KAKAO_REST_KEY')) throw new ApiError(501, '카카오 REST 키가 없어 검색할 수 없어요');
+  if (!env('KAKAO_REST_KEY') || env('MOCK') === '1') throw new ApiError(501, '카카오 REST 키가 없거나 예시 데이터 모드라 검색할 수 없어요');
   // 카카오 검색 결과도 서버에 저장하지 않습니다. 같은 사용자의 세션 안 재사용은 브라우저(app.js)에서만 합니다.
   const u = new URL('https://dapi.kakao.com/v2/local/search/keyword.json');
   u.searchParams.set('query', query); u.searchParams.set('x', '127.385'); u.searchParams.set('y', '36.350');
@@ -383,6 +385,7 @@ async function health(q) {
   const keys = { DATA_GO_KR_KEY: !!env('DATA_GO_KR_KEY'), KAKAO_JS_KEY: !!env('KAKAO_JS_KEY'), KAKAO_REST_KEY: !!env('KAKAO_REST_KEY'), TASHU_KEY: !!env('TASHU_KEY'),
     DJ_SUBWAY_TEST_URL: !!env('DJ_SUBWAY_TEST_URL'), MOCK: env('MOCK') === '1' };
   const checks = [];
+  if (keys.MOCK) return { keys, checks, note: '예시 데이터 모드(MOCK=1)라 외부 API 점검을 하지 않았어요. .env에서 MOCK=0으로 바꾸고 다시 실행하세요.' };
   if (!keys.DATA_GO_KR_KEY) return { keys, checks, note: '.env에 DATA_GO_KR_KEY가 없어 공공데이터 점검을 건너뛰었어요.' };
   const lat = Number(q.lat) || ORIGIN.lat, lng = Number(q.lng) || ORIGIN.lng;
 

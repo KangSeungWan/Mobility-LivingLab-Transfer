@@ -27,7 +27,7 @@ function world(o = {}) {
   const calls = {}; const count = (p) => (calls[p] = (calls[p] || 0) + 1);
   const now = { t: o.now || KST(14, 0) };
   const fetchImpl = async (url) => {
-    const p = String(url).split('?')[0]; count(p);
+    const p = String(url).split('?')[0]; count(p); (calls.urls = calls.urls || []).push(String(url));
     if (o.delay) await new Promise((r) => setTimeout(r, o.delay));
     const fail = (o.fail || []).includes(p);
     let body = {};
@@ -131,6 +131,25 @@ function world(o = {}) {
   store.down = true; ext = {}; const C = fresh();
   const rd = await run(C, C.arrivals, {}, { nodeId: 'DJB8999999' });
   ok('공유 저장소 장애: 외부 호출 0회로 멈춤(503)', rd.status === 503 && !ext['apis.data.go.kr/arr']);
+
+  /* ===== 개발 통신 보호 · 위치 (H01-13, H02) ===== */
+  delete process.env.UPSTASH_REDIS_REST_URL; delete process.env.UPSTASH_REDIS_REST_TOKEN;
+  process.env.MOCK = '1'; ext = {}; core = fresh();
+  await run(core, core.search, { perMin: 30 }, { q: '대전역' });
+  const hm = await core.health({});
+  await core.arrivals({ nodeId: 'DJB8005589' }).catch(() => {});
+  ok('H01-13 MOCK=1: 검색·점검·도착정보 모두 외부 호출 0회', Object.keys(ext).length === 0 && !!hm.note, JSON.stringify(ext));
+  process.env.MOCK = '0'; core = fresh();
+  const stopsHandler = require(path.join(ROOT, 'api/stops.js')), tashuHandler = require(path.join(ROOT, 'api/tashu.js'));
+  const hdr = (hd, q) => new Promise((r) => { const res = { headers: {}, setHeader(k, v) { this.headers[k] = v; }, end() { r(this.headers['Cache-Control']); } }; hd({ query: q, headers: { 'x-forwarded-for': '9.9.9.9' } }, res); });
+  global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ response: { header: { resultCode: '00' }, body: { items: '' } }, results: [] }) });
+  const cs = await hdr(stopsHandler, { lat: '36.3653', lng: '127.3465' }), ctz = await hdr(tashuHandler, { lat: '36.3653', lng: '127.3465' });
+  ok('H02 좌표가 들어간 응답(정류장·타슈)은 CDN 공유 캐시 안 함', cs === 'no-store' && ctz === 'no-store', `${cs} / ${ctz}`);
+  w = world({}); w.T.st.subway = timetable(23); w.T.st.origin = { name: 'x', lat: 36.3652480902867, lng: 127.346479084829 };
+  await w.T.loadStops();
+  const coordUrls = w.calls.urls.filter((u) => /lat=|olat=/.test(u));
+  const maxDec = Math.max(...coordUrls.flatMap((u) => [...new URLSearchParams(u.split('?')[1]).values()].filter((v) => /^-?\d+\.\d+$/.test(v)).map((v) => v.split('.')[1].length)));
+  ok('H02 서버로 보내는 좌표는 소수 4자리 이하', maxDec <= 4, `요청 ${coordUrls.length}건 · 최대 ${maxDec}자리`);
 
   console.log(`\n결과: 통과 ${pass} / 실패 ${fail}`);
   process.exit(fail ? 1 : 0);
