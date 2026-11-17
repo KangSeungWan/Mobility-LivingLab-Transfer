@@ -3,11 +3,16 @@
 const SC = window.SCENARIO;
 const SEG = { walk: '도보', wait: '대기', ride: '버스·택시·타슈', dock: '타슈 대여·반납', sub: '지하철' };
 const REFRESH_MS = 30000;
+const DRIVE_TTL_MS = 5 * 60000;    // 같은 세션 안에서 같은 구간 택시 결과를 다시 쓰는 시간
+const DRIVE_STALE_MS = 15 * 60000; // 이보다 오래된 택시 결과는 '확인됨'으로 보지 않음
+const TASHU_STALE_MS = 3 * 60000;
 
 const st = {
   origin: { ...SC.origin }, dest: { ...SC.dest }, pick: 'origin', tab: 'compare',
   stops: [], stopsErr: null, arr: {}, drive: {}, cfg: { mock: true, drive: false }, loading: false, updated: null,
   map: null, overlays: {}, stopOverlays: [], open: new Set(),
+  gen: 0, arrBusy: 0, driveVer: 0, tashuAt: 0,
+  driveCache: {}, searchCache: new Map(), // 이 브라우저 세션 안에서만 쓰는 임시 보관 (서버·다른 사용자와 공유하지 않음)
 };
 const $ = (s) => document.querySelector(s);
 const won = (n) => Math.round(n).toLocaleString('ko-KR') + '원';
@@ -124,14 +129,17 @@ function setPick(which) {
 }
 
 /* ---------------- 데이터 ---------------- */
-async function loadStops() {
+async function loadStops(refresh) {
+  const gen = ++st.gen;
   st.stopsErr = null; st.stopsNote = null; st.loading = true; render();
   try {
     const r = await api('/api/stops', { lat: st.origin.lat.toFixed(6), lng: st.origin.lng.toFixed(6) });
+    if (gen !== st.gen) return;                       // 그 사이 출발지가 또 바뀌었으면 이 결과는 버림
     st.stops = r.stops.map((s) => ({ ...s, d: dist(st.origin, s) })).filter((s) => s.d <= 600).sort((a, b) => a.d - b.d).slice(0, 8);
     drawStops();
-    await loadArrivals();
+    await Promise.all([loadArrivals(true), loadDrives(refresh)]);
   } catch (e) {
+    if (gen !== st.gen) return;
     // 근처 정류장 API가 안 될 때(미승인 등): scenario.js에 적어 둔 정류장 번호로 대전시 도착정보 사용
     const fixed = (SC.bus.arsStops || []).filter((x) => x.arsId);
     if (fixed.length) {
@@ -139,23 +147,31 @@ async function loadStops() {
         .map((x) => ({ ...x, d: x.lat && x.lng ? dist(st.origin, x) : 300 }));
       st.stopsNote = `근처 정류장 찾기 API를 쓸 수 없어 scenario.js에 지정한 정류장 ${fixed.length}곳의 도착정보를 보여 줘요. (${e.message})`;
       drawStops();
-      await loadArrivals();
-    } else { st.stops = []; st.stopsErr = e.message; await Promise.all([loadDrives(), loadTashu()]); }
-  } finally { st.loading = false; render(); }
+      await Promise.all([loadArrivals(true), loadDrives(refresh)]);
+    } else { st.stops = []; st.stopsErr = e.message; await Promise.all([loadDrives(refresh), loadTashu()]); }
+  } finally { if (gen === st.gen) { st.loading = false; render(); } }
 }
-async function loadArrivals() {
-  await Promise.all(st.stops.map(async (s) => {
-    try {
-      let r = await (s.arsId ? api('/api/arrivals-dj', { arsId: s.arsId }) : api('/api/arrivals', { nodeId: s.id }).catch((e) => { if (!s.no) throw e; return { list: [] }; }));
-      if (!s.arsId && !r.list.length && s.no && !r.mock) r = await api('/api/arrivals-dj', { arsId: s.no }); // TAGO가 비면 대전시 API로 보조 조회
-      st.arr[s.id] = { ...r, err: null };
-    }
-    catch (e) { st.arr[s.id] = { list: [], at: Date.now(), err: e.message }; }
-  }));
-  st.updated = Date.now();
-  await Promise.all([loadDrives(), loadTashu()]);
-  drawStops();
-  render();
+// 30초마다 부르는 갱신: 버스 도착정보와 타슈만. 택시(카카오 길찾기)는 여기서 부르지 않음
+async function loadArrivals(force) {
+  if (st.arrBusy && !force) return;                   // 이전 갱신이 안 끝났으면 겹쳐 부르지 않음
+  const gen = st.gen, res = {};
+  st.arrBusy++;
+  try {
+    await Promise.all(st.stops.map(async (s) => {
+      try {
+        let r = await (s.arsId ? api('/api/arrivals-dj', { arsId: s.arsId }) : api('/api/arrivals', { nodeId: s.id }).catch((e) => { if (!s.no) throw e; return { list: [] }; }));
+        if (!s.arsId && !r.list.length && s.no && !r.mock) r = await api('/api/arrivals-dj', { arsId: s.no }); // TAGO가 비면 대전시 API로 보조 조회
+        res[s.id] = { ...r, err: null };
+      }
+      catch (e) { res[s.id] = { list: [], at: Date.now(), err: e.message }; }
+    }));
+    if (gen !== st.gen) return;
+    st.arr = res;
+    st.updated = Date.now();
+    await loadTashu();
+    drawStops();
+    render();
+  } finally { st.arrBusy--; }
 }
 async function loadSubway() {
   try { st.subway = await api('/api/subway', { from: SC.subway.stNum, to: SC.subway.destStNum }); }
@@ -163,16 +179,31 @@ async function loadSubway() {
 }
 async function loadTashu() {
   if (!st.cfg.tashu && !st.cfg.mock) { st.tashu = null; return; }
-  try { st.tashu = await api('/api/tashu', { lat: st.origin.lat.toFixed(6), lng: st.origin.lng.toFixed(6) }); st.tashuErr = null; }
-  catch (e) { st.tashu = null; st.tashuErr = e.message; }
+  const gen = st.gen;
+  try {
+    const r = await api('/api/tashu', { lat: st.origin.lat.toFixed(6), lng: st.origin.lng.toFixed(6) });
+    if (gen !== st.gen) return;
+    st.tashu = r; st.tashuAt = Date.now(); st.tashuErr = null;
+  }
+  catch (e) { if (gen === st.gen) { st.tashu = null; st.tashuErr = e.message; } }
 }
-async function loadDrives() {
+// 택시 시간·요금(카카오 길찾기): 출발지·목적지가 바뀌었을 때와 새로고침을 눌렀을 때만 조회
+async function loadDrives(force) {
   if (!st.cfg.drive) return;
-  const pairs = { dest: [st.origin, st.dest], hub: [st.origin, SC.hub] };
+  const ver = ++st.driveVer;
+  if (dist(st.origin, SC.origin) > 1000 || dist(st.dest, SC.dest) > 1000) { st.drive = {}; return; } // 비교 구간 밖이면 조회하지 않음
+  const pairs = { dest: [st.origin, st.dest], hub: [st.origin, SC.hub] }, out = {};
   await Promise.all(Object.entries(pairs).map(async ([k, [o, d]]) => {
-    try { st.drive[k] = await api('/api/drive', { olat: o.lat, olng: o.lng, dlat: d.lat, dlng: d.lng }); }
-    catch { st.drive[k] = null; }
+    const key = [o.lat, o.lng, d.lat, d.lng].map((v) => Number(v).toFixed(5)).join(',');
+    const hit = st.driveCache[key];
+    if (!force && hit && Date.now() - hit.t < DRIVE_TTL_MS) { out[k] = hit; return; }
+    try {
+      const v = await api('/api/drive', { olat: o.lat, olng: o.lng, dlat: d.lat, dlng: d.lng });
+      out[k] = st.driveCache[key] = { ...v, t: Date.now() };
+    } catch { out[k] = null; }
   }));
+  if (ver !== st.driveVer) return;                    // 조회하는 동안 위치가 바뀌었으면 옛 결과로 덮지 않음
+  st.drive = out;
 }
 
 /* ---------------- 경로 계산 ---------------- */
@@ -189,7 +220,7 @@ function subwayNext(platformMs) {
     const set = tt[day] && tt[day][SC.subway.dir];
     if (set && set.from.length) {
       const dep = set.from.find((x) => x >= tb - 1e-9);
-      if (dep == null) return { wait: 0, ride: SC.subway.rideMin, dep: null, table: true, ended: true };
+      if (dep == null) return { wait: 0, ride: 0, dep: null, table: true, ended: true };   // 막차 이후: 탈 열차 없음
       const fromTable = !!set.ride;
       return { wait: dep - t, ride: fromTable ? set.ride : SC.subway.rideMin, dep, table: true, rideTable: fromTable, holiday: day === SC.subway.dayHoliday };
     }
@@ -220,18 +251,26 @@ function build(key, name, sub, segs, fare, opts = {}) {
   const steps = segs.map((s) => { const start = t; t += s.min * 60000; return { ...s, start }; });
   return { key, name, sub, steps, fare, arrive: t, total: (t - Date.now()) / 60000, ...opts };
 }
+// 경로마다 '지금 이용할 수 있는지'를 함께 계산합니다.
+//   avail 'ok'      = 운행·대여 가능 여부를 실시간 정보나 시각표로 확인함 → 추천 대상
+//   avail 'unknown' = 조회 실패 등으로 가정값이 섞임 → 참고용으로만 표시, 추천하지 않음
+//   avail 'no'      = 막차 종료·자전거 없음 → 이용 불가, 추천하지 않음
 function computeRoutes() {
   const now = Date.now(), list = [];
+  const mock = !!st.cfg.mock;
+  const status = (no, unk) => { if (mock) unk = [...unk, '예시 데이터']; return { avail: no.length ? 'no' : unk.length ? 'unknown' : 'ok', why: no.length ? no : unk }; };
   const subwayTail = (startMs, before) => {
     const used = before.reduce((a, s) => a + s.min, 0);
     const n = subwayNext(startMs + used * 60000);
+    if (n.ended) return { ended: true, assumed: false, segs: [{ type: 'wait', min: 0, label: '지하철 운행 종료', note: '시각표상 오늘 탈 수 있는 열차가 없어요' }] };
     const depClock = clock(startMs + (used + n.wait) * 60000);
-    const waitNote = n.ended ? '시각표상 오늘 열차 운행이 끝났어요'
-      : n.table ? `${SC.hub.name} ${depClock} 출발 · ${n.holiday ? '휴일' : '평일'} 시각표`
+    const waitNote = n.table ? `${SC.hub.name} ${depClock} 출발 · ${n.holiday ? '휴일' : '평일'} 시각표`
       : `${SC.hub.name} 출발 ${depClock} 열차 (간격 ${SC.subway.headwayMin}분 가정)`;
-    return [{ type: 'wait', min: n.wait, label: '열차 대기', note: waitNote },
-      { type: 'sub', min: n.ride, label: '지하철 1호선', note: `${SC.hub.name} → ${SC.dest.name}${n.rideTable ? ' · 시각표 기준' : ''}` }];
+    return { ended: false, assumed: !n.table, segs: [{ type: 'wait', min: n.wait, label: '열차 대기', note: waitNote },
+      { type: 'sub', min: n.ride, label: '지하철 1호선', note: `${SC.hub.name} → ${SC.dest.name}${n.rideTable ? ' · 시각표 기준' : ''}` }] };
   };
+  const subNo = (t) => (t.ended ? ['지하철 운행 종료'] : []);
+  const subUnk = (t) => (t.assumed ? ['열차 시각표 없음 · 간격 가정'] : []);
 
   // A 버스 + 지하철 (버스 대기 = 실시간)
   const bus = findBus();
@@ -244,46 +283,65 @@ function computeRoutes() {
   ];
   aHead.push({ type: 'ride', min: SC.bus.rideMin, label: `${SC.bus.routeNo}번 버스`, note: `${SC.hub.name} 인근 하차` },
     { type: 'walk', min: SC.bus.walkToPlatformMin, label: '승강장까지 도보·역내 이동' });
-  list.push(build('A', '버스 + 지하철', `${SC.bus.routeNo}번 → ${SC.hub.name} → 지하철`, [...aHead, ...subwayTail(now, aHead)], SC.fare.busSubway, { base: true, live: !!(bus && bus.catchable) }));
+  const aTail = subwayTail(now, aHead);
+  list.push(build('A', '버스 + 지하철', `${SC.bus.routeNo}번 → ${SC.hub.name} → 지하철`, [...aHead, ...aTail.segs], SC.fare.busSubway,
+    { base: true, live: !!(bus && bus.catchable), ...status(subNo(aTail), [...(!bus ? ['버스 도착정보 없음'] : !bus.catchable ? ['다음 버스 시각은 가정값'] : []), ...subUnk(aTail)]) }));
+
+  // 택시(카카오 길찾기) 결과 상태
+  const driveUnk = (d) => (!d ? ['택시 시간·요금 조회 실패 · 고정값'] : now - d.t > DRIVE_STALE_MS ? ['택시 정보가 오래됨 · 새로고침 필요'] : []);
+  const driveNote = (d, extra) => (d ? `카카오 길찾기 · ${clock(d.t)} 조회${extra || ''}` : null);
 
   // B 택시
   const dDest = st.drive.dest;
   list.push(build('B', '전 구간 택시', `${st.origin.name} → ${st.dest.name}`, [
     { type: 'wait', min: SC.taxi.waitMin, label: '택시 호출·대기', note: '가정값' },
-    { type: 'ride', min: dDest ? dDest.durationSec / 60 : SC.taxi.toDestMin, label: '택시 주행', live: !!dDest, note: dDest ? `카카오 길찾기 · ${(dDest.distanceM / 1000).toFixed(1)}km` : '고정값' },
-  ], dDest && dDest.taxiFare ? dDest.taxiFare : SC.taxi.toDestFare, { live: !!dDest }));
+    { type: 'ride', min: dDest ? dDest.durationSec / 60 : SC.taxi.toDestMin, label: '택시 주행', live: !!dDest, note: driveNote(dDest, dDest ? ` · ${(dDest.distanceM / 1000).toFixed(1)}km` : '') || '고정값' },
+  ], dDest && dDest.taxiFare ? dDest.taxiFare : SC.taxi.toDestFare, { live: !!dDest, ...status([], driveUnk(dDest)) }));
 
-  // D 타슈 + 지하철
+  // 타슈 상태: 'ok' 자전거 있는 대여소 확인 / 'none' 근처 대여소에 0대 / 'unknown' 조회 실패·키 없음·오래됨
   const T = SC.tashu;
-  // 타슈 실시간: 자전거가 1대 이상 있는 가장 가까운 대여소
-  const tStart = st.tashu && !st.tashu.mock ? st.tashu.stations.find((x) => x.bikes > 0) : null;
+  const tLive = st.tashu && !st.tashu.mock && now - st.tashuAt <= TASHU_STALE_MS;
+  const tStart = tLive ? st.tashu.stations.find((x) => x.bikes > 0) : null;
+  const tState = !tLive ? 'unknown' : tStart ? 'ok' : 'none';
+  const tNo = tState === 'none' ? ['근처 대여소에 자전거 없음'] : [];
+  const tUnk = tState === 'unknown' ? ['타슈 대여 가능 여부 미확인'] : [];
   const tWalk = tStart
     ? { type: 'walk', min: walkMin(tStart.d), label: `${tStart.name}까지 도보`, live: true, note: `자전거 ${tStart.bikes}대 · 실시간 · ${tStart.d}m` }
-    : { type: 'walk', min: T.walkMin, label: '타슈 대여소까지 도보', note: st.tashu && !st.tashu.mock ? '근처 대여소에 자전거 없음 · 가정값' : '가정값' };
+    : { type: 'walk', min: T.walkMin, label: '타슈 대여소까지 도보', note: tState === 'none' ? '근처 대여소에 자전거 없음' : '대여소 정보 없음 · 가정값' };
+
+  // D 타슈 + 지하철
   const dHead = [
     tWalk, { type: 'dock', min: T.dockMin, label: '타슈 대여' },
     { type: 'ride', min: T.toHubMin, label: '타슈 주행', note: `${SC.hub.name} 인근 대여소까지` }, { type: 'dock', min: T.dockMin, label: '타슈 반납' },
     { type: 'walk', min: T.hubWalkMin, label: '승강장까지 도보·역내 이동' },
   ];
-  list.push(build('D', '타슈 + 지하철', `타슈 → ${SC.hub.name} → 지하철`, [...dHead, ...subwayTail(now, dHead)], SC.fare.busSubway, { live: !!tStart, noBike: !!(st.tashu && !st.tashu.mock && !tStart) }));
+  const dTail = subwayTail(now, dHead);
+  list.push(build('D', '타슈 + 지하철', `타슈 → ${SC.hub.name} → 지하철`, [...dHead, ...dTail.segs], SC.fare.busSubway,
+    { live: !!tStart, ...status([...tNo, ...subNo(dTail)], [...tUnk, ...subUnk(dTail)]) }));
 
   // E 택시 + 지하철
   const dHub = st.drive.hub;
   const eHead = [
     { type: 'wait', min: SC.taxi.waitMin, label: '택시 호출·대기', note: '가정값' },
-    { type: 'ride', min: dHub ? dHub.durationSec / 60 : SC.taxi.toHubMin, label: '택시 주행', live: !!dHub, note: dHub ? '카카오 길찾기' : `${SC.hub.name}까지 고정값` },
+    { type: 'ride', min: dHub ? dHub.durationSec / 60 : SC.taxi.toHubMin, label: '택시 주행', live: !!dHub, note: driveNote(dHub) || `${SC.hub.name}까지 고정값` },
     { type: 'walk', min: SC.taxi.hubWalkMin, label: '승강장까지 도보·역내 이동' },
   ];
-  list.push(build('E', '택시 + 지하철', `택시 → ${SC.hub.name} → 지하철`, [...eHead, ...subwayTail(now, eHead)],
-    (dHub && dHub.taxiFare ? dHub.taxiFare : SC.taxi.toHubFare) + SC.fare.busSubway, { live: !!dHub }));
+  const eTail = subwayTail(now, eHead);
+  list.push(build('E', '택시 + 지하철', `택시 → ${SC.hub.name} → 지하철`, [...eHead, ...eTail.segs],
+    (dHub && dHub.taxiFare ? dHub.taxiFare : SC.taxi.toHubFare) + SC.fare.busSubway, { live: !!dHub, ...status(subNo(eTail), [...driveUnk(dHub), ...subUnk(eTail)]) }));
 
   // C 전 구간 타슈
   list.push(build('C', '전 구간 타슈', '60분 내 반납 시 무료', [
     tWalk, { type: 'dock', min: T.dockMin, label: '타슈 대여' },
     { type: 'ride', min: T.toDestMin, label: '타슈 주행', note: `${st.dest.name} 인근 대여소까지` }, { type: 'dock', min: T.dockMin, label: '타슈 반납', note: '반납 후 도보는 미포함' },
-  ], T.fare, { plus: true }));
+  ], T.fare, { plus: true, ...status(tNo, tUnk) }));
 
   return { list, bus };
+}
+// 추천: 이용 가능이 확인된 경로(avail 'ok') 중, 기준 요금 이하에서 가장 빨리 도착하는 경로. 없으면 추천하지 않음
+function pickBest(list) {
+  const base = list.find((r) => r.base);
+  return list.filter((r) => r.avail === 'ok' && r.fare <= base.fare && !r.plus).sort((a, b) => a.arrive - b.arrive)[0] || null;
 }
 
 /* ---------------- 화면 ---------------- */
@@ -293,32 +351,37 @@ function segBar(r, maxMin) {
   return h('div', { class: 'track', style: `width:${Math.min(100, (r.total / maxMin) * 100)}%` }, segs);
 }
 function routeCard(r, base, bestKey, maxMin) {
+  const off = r.avail === 'no', unk = r.avail === 'unknown';
   const dmin = Math.round((r.arrive - base.arrive) / 60000), extra = r.fare - base.fare;
   const pills = [];
-  if (!r.base) {
-    pills.push(h('span', { class: 'pill ' + (dmin < 0 ? 'good' : dmin > 0 ? 'bad' : '') }, dmin === 0 ? '버스+지하철과 같은 시각' : `버스+지하철보다 ${Math.abs(dmin)}분 ${dmin < 0 ? '일찍' : '늦게'}${r.plus && dmin > 0 ? ' 이상' : ''}`));
+  (r.why || []).forEach((w) => pills.push(h('span', { class: 'pill ' + (off ? 'bad' : 'warn') }, w)));
+  if (!r.base && !off) {
+    if (base.avail !== 'no') pills.push(h('span', { class: 'pill ' + (dmin < 0 ? 'good' : dmin > 0 ? 'bad' : '') }, dmin === 0 ? '버스+지하철과 같은 시각' : `버스+지하철보다 ${Math.abs(dmin)}분 ${dmin < 0 ? '일찍' : '늦게'}${r.plus && dmin > 0 ? ' 이상' : ''}`));
     pills.push(h('span', { class: 'pill ' + (extra > 0 ? 'bad' : extra < 0 ? 'good' : '') }, extra === 0 ? '추가 요금 없음' : (extra > 0 ? '+' : '') + won(extra)));
   }
-  if (r.noBike) pills.unshift(h('span', { class: 'pill bad' }, '근처 대여소 자전거 없음'));
-  const waitSum = r.steps.filter((s) => s.type === 'wait').reduce((a, s) => a + s.min, 0);
-  pills.push(h('span', { class: 'pill' }, `기다림 ${Math.round(waitSum)}분`));
+  if (!off) {
+    const waitSum = r.steps.filter((s) => s.type === 'wait').reduce((a, s) => a + s.min, 0);
+    pills.push(h('span', { class: 'pill' }, `기다림 ${Math.round(waitSum)}분`));
+  }
 
   const tl = h('ol', { class: 'tl' });
   r.steps.forEach((s) => tl.append(h('li', null, h('time', null, clock(s.start)),
     h('div', { class: 'rail' }, h('b', { style: `background:var(--${s.type})` }), h('s', { style: `background:var(--${s.type})` })),
     h('div', { class: 'w' }, h('b', null, s.label, s.live ? h('span', { class: 'live-mark' }, ' · 실시간') : null),
       h('span', null, `${Math.round(s.min)}분${s.note ? ' · ' + s.note : ''}`)))));
-  tl.append(h('li', null, h('time', null, clock(r.arrive)), h('div', { class: 'rail' }, h('b', { style: 'background:var(--ink)' })),
-    h('div', { class: 'w' }, h('b', null, `${st.dest.name} 도착`), h('span', null, `총 ${Math.round(r.total)}분 · ${won(r.fare)}`))));
+  tl.append(h('li', null, h('time', null, off ? '—' : clock(r.arrive)), h('div', { class: 'rail' }, h('b', { style: 'background:var(--ink)' })),
+    h('div', { class: 'w' }, off ? h('b', null, '지금은 이용할 수 없어요') : h('b', null, `${st.dest.name} 도착`), h('span', null, off ? r.why.join(' · ') : `총 ${Math.round(r.total)}분 · ${won(r.fare)}`))));
 
-  return h('article', { class: 'route' + (r.base ? ' base' : '') + (r.key === bestKey ? ' best' : '') },
+  return h('article', { class: 'route' + (r.base ? ' base' : '') + (r.key === bestKey ? ' best' : '') + (off ? ' off' : '') },
     h('div', { class: 'rh' }, h('span', { class: 'letter' }, r.key), h('div', { class: 'rn' }, r.name, h('small', null, r.sub)),
-      r.live ? h('span', { class: 'tag live' }, '실시간') : null,
+      r.live && r.avail === 'ok' ? h('span', { class: 'tag live' }, '실시간') : null,
+      off ? h('span', { class: 'tag off' }, '이용 불가') : null,
+      unk ? h('span', { class: 'tag assume' }, '가정값 포함') : null,
       r.base ? h('span', { class: 'tag base' }, '기준') : null,
       r.key === bestKey ? h('span', { class: 'tag best' }, '추천') : null),
-    h('div', { class: 'nums' }, h('span', { class: 'arr' }, clock(r.arrive) + (r.plus ? '+' : ''), h('small', null, '도착')),
-      h('span', { class: 'mins' }, `${Math.round(r.total)}분${r.plus ? '+' : ''}`), h('span', { class: 'fare' }, won(r.fare))),
-    segBar(r, maxMin),
+    h('div', { class: 'nums' }, h('span', { class: 'arr' }, off ? '—' : clock(r.arrive) + (r.plus ? '+' : ''), h('small', null, off ? '이용 불가' : unk ? '도착(참고)' : '도착')),
+      h('span', { class: 'mins' }, off ? '' : `${Math.round(r.total)}분${r.plus ? '+' : ''}`), h('span', { class: 'fare' }, won(r.fare))),
+    off ? null : segBar(r, maxMin),
     h('div', { class: 'pills' }, pills),
     h('details', { open: st.open.has(r.key), ontoggle: (e) => { if (e.target.open) st.open.add(r.key); else st.open.delete(r.key); } }, h('summary', null, '단계별 시각 보기'), tl));
 }
@@ -332,19 +395,23 @@ function renderCompare(c) {
   }
   const { list, bus } = computeRoutes();
   const base = list.find((r) => r.base);
-  const limitFare = base.fare; // 추천: 추가 요금 없는 경로 중 가장 빨리 도착
-  const best = list.filter((r) => r.fare <= limitFare && !r.plus).sort((a, b) => a.arrive - b.arrive)[0];
-  const maxMin = Math.max(60, ...list.map((r) => r.total));
-  const others = list.filter((r) => !r.base).sort((a, b) => a.arrive - b.arrive);
+  const best = pickBest(list);
+  const maxMin = Math.max(60, ...list.filter((r) => r.avail !== 'no').map((r) => r.total));
+  const others = list.filter((r) => !r.base).sort((a, b) => (a.avail === 'no') - (b.avail === 'no') || a.arrive - b.arrive); // 이용 불가는 맨 아래
+  const noBest = best ? null
+    : list.every((r) => r.avail === 'no') ? '지금은 이용할 수 있는 경로가 없어요. (지하철 운행 종료·타슈 자전거 없음)'
+    : list.some((r) => r.avail === 'ok') ? '버스+지하철 요금 안에서 이용 가능이 확인된 경로가 없어 추천을 표시하지 않아요. 요금이 더 드는 경로는 아래에서 비교할 수 있어요.'
+    : '실시간 정보로 이용 가능 여부를 확인하지 못해 추천을 표시하지 않아요. 아래 시각은 가정값이 섞인 참고용이에요.';
   c.append(
-    h('p', { class: 'hint' }, `지금(${clock(Date.now())}) 출발 기준 · 추천은 버스+지하철 요금 안에서 가장 빨리 도착하는 경로`),
+    h('p', { class: 'hint' }, `지금(${clock(Date.now())}) 출발 기준 · 추천은 지금 이용할 수 있다고 확인된 경로 중, 버스+지하철 요금 안에서 가장 빨리 도착하는 경로`),
+    noBest ? h('p', { class: 'banner' }, noBest) : null,
     h('div', { class: 'legend' }, ...['walk', 'wait', 'ride', 'dock', 'sub'].map((k) => h('span', null, h('i', { style: `background:var(--${k})` }), SEG[k]))),
     routeCard(base, base, best && best.key, maxMin),
     ...others.map((r) => routeCard(r, base, best && best.key, maxMin)),
     h('p', { class: 'note' }, bus
       ? `${SC.bus.routeNo}번 실시간 정보: ${bus.stop.name} (${bus.stop.fixed ? '번호 ' + bus.stop.arsId : bus.stop.id})${SC.bus.stopIds.length || bus.stop.fixed ? '' : ' · 방향 미지정 — scenario.js의 stopIds에 월평역 방면 정류장 ID를 넣으세요'}`
       : `근처 정류장에서 ${SC.bus.routeNo}번 도착정보를 찾지 못해 버스 대기는 가정값입니다.`),
-    h('p', { class: 'note' }, `${st.subway && st.subway.days ? '지하철은 대전교통공사 열차시각표(평일·휴일) 기준입니다. 공휴일은 평일 시각표로 계산돼요.' : `지하철 시각표를 불러오지 못해 ${SC.subway.anchor} 기준 ${SC.subway.headwayMin}분 간격으로 가정했습니다.`} 도보·타슈·역내 이동은 실측 전 고정값입니다.${st.cfg.drive ? '' : ' 택시는 고정값입니다.'}`));
+    h('p', { class: 'note' }, `${st.subway && st.subway.days ? '지하철은 대전교통공사 열차시각표(평일·휴일) 기준입니다. 공휴일은 평일 시각표로 계산돼요.' : `지하철 시각표를 불러오지 못해 ${SC.subway.anchor} 기준 ${SC.subway.headwayMin}분 간격으로 가정했습니다.`} 도보·타슈 주행·역내 이동은 실측 전 고정값입니다.${st.cfg.drive && st.drive.dest && st.drive.hub ? ' 택시 시간·요금은 출발지·목적지를 바꾸거나 새로고침(↻)을 누를 때 다시 조회해요.' : ' 택시는 고정값입니다.'}`));
 }
 function renderStops(c) {
   if (st.tashu && st.tashu.stations.length) {
@@ -389,7 +456,14 @@ async function search(q) {
   if (!st.cfg.search) { box.replaceChildren(h('li', { class: 'hint', style: 'padding:8px 10px' }, '장소 검색은 .env에 KAKAO_REST_KEY를 넣으면 사용할 수 있어요. 지금은 지도를 눌러 위치를 지정하세요.')); return; }
   box.replaceChildren(h('li', { class: 'hint', style: 'padding:8px 10px' }, '검색 중…'));
   let places;
-  try { places = (await api('/api/search', { q })).places; }
+  try {
+    if (st.searchCache.has(q)) places = st.searchCache.get(q);        // 이 세션에서 이미 찾은 검색어는 다시 조회하지 않음
+    else {
+      places = (await api('/api/search', { q })).places;
+      st.searchCache.set(q, places);
+      if (st.searchCache.size > 30) st.searchCache.delete(st.searchCache.keys().next().value);
+    }
+  }
   catch (e) { box.replaceChildren(h('li', { class: 'err', style: 'padding:8px 10px' }, e.message)); return; }
   if (!places.length) { box.replaceChildren(h('li', { class: 'hint', style: 'padding:8px 10px' }, '검색 결과가 없어요.')); return; }
   box.replaceChildren(...places.slice(0, 8).map((p) => {
@@ -406,7 +480,7 @@ async function start() {
   $('#pickDest').onclick = () => setPick('dest');
   $('#tabCompare').onclick = () => { st.tab = 'compare'; render(); };
   $('#tabStops').onclick = () => { st.tab = 'stops'; render(); };
-  $('#refresh').onclick = () => loadStops();
+  $('#refresh').onclick = () => loadStops(true);   // 새로고침: 택시 정보도 다시 조회
   $('#swap').onclick = () => { const o = st.origin; st.origin = st.dest; st.dest = o; setPoint('origin', st.origin); };
   $('#searchForm').onsubmit = (e) => { e.preventDefault(); const q = $('#q').value.trim(); if (q) search(q); };
   $('#myLoc').onclick = () => {

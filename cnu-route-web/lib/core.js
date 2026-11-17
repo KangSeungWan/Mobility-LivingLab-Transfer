@@ -10,16 +10,77 @@ class ApiError extends Error {
 const env = (k) => (process.env[k] || '').trim();
 const isMock = () => env('MOCK') === '1' || !env('DATA_GO_KR_KEY');
 
+// 공공 원천 데이터(정류소·도착정보·시각표·타슈 전체 목록)만 서버 메모리에 잠깐 둡니다.
+// 카카오 검색·길찾기 결과는 사용자 간 공유가 허용되지 않아 여기에 넣지 않습니다.
+const INFLIGHT = new Map();
 async function cached(key, ttlMs, fn) {
-  const hit = CACHE.get(key);
-  if (hit && Date.now() - hit.t < ttlMs) return hit.v;
-  const v = await fn();
-  CACHE.set(key, { t: Date.now(), v });
-  if (CACHE.size > 500) CACHE.delete(CACHE.keys().next().value);
-  return v;
+  const now = Date.now(), hit = CACHE.get(key);
+  if (hit && now < hit.exp) return hit.v;
+  if (INFLIGHT.has(key)) return INFLIGHT.get(key);           // 같은 요청이 진행 중이면 합쳐서 외부 호출 1번만
+  const p = (async () => {
+    try {
+      const v = await fn();
+      CACHE.set(key, { exp: Date.now() + ttlMs, v });
+      for (const [k, c] of CACHE) if (Date.now() >= c.exp) CACHE.delete(k);   // 만료된 항목은 바로 지움
+      if (CACHE.size > 500) CACHE.delete(CACHE.keys().next().value);
+      return v;
+    } finally { INFLIGHT.delete(key); }
+  })();
+  INFLIGHT.set(key, p);
+  return p;
+}
+
+/* ---------- 제공기관별 하루 호출량 제한 ---------- */
+// 외부 API를 부르기 직전에 1회씩 예약합니다(재시도·점검 호출 포함). 한도를 넘으면 외부 호출 없이 멈춥니다.
+// 기본값은 공개된 개발계정 트래픽보다 낮게 잡은 임시값입니다. 실제 승인량에 맞춰 환경변수 QUOTA_이름 으로 조정하세요.
+const QUOTA_DEFAULT = { tago_stops: 8000, tago_arrival: 8000, dj_arrival: 8000, subway: 800, kakao_drive: 3000, kakao_search: 3000, tashu: 3000, other: 100 };
+const QUOTA_LOCAL = new Map();
+function quotaFor(url) {
+  const u = String(url);
+  if (u.includes('BusSttnInfoInqireService')) return 'tago_stops';
+  if (u.includes('ArvlInfoInqireService')) return 'tago_arrival';
+  if (u.includes('/6300000/arrive') || (env('DJ_ARRIVAL_URL') && u.startsWith(env('DJ_ARRIVAL_URL')))) return 'dj_arrival';
+  if (u.includes('TimeTableSVC') || (env('DJ_SUBWAY_URL') && u.startsWith(env('DJ_SUBWAY_URL')))) return 'subway';
+  if (u.includes('apis-navi.kakaomobility.com')) return 'kakao_drive';
+  if (u.includes('dapi.kakao.com')) return 'kakao_search';
+  if (u.includes('tashu.or.kr')) return 'tashu';
+  return 'other';
+}
+const quotaLimit = (name) => { const raw = env('QUOTA_' + name.toUpperCase()), v = Number(raw); return raw !== '' && Number.isFinite(v) && v >= 0 ? v : QUOTA_DEFAULT[name]; };
+const kstDay = () => new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);
+const quotaStore = () => {
+  const url = env('UPSTASH_REDIS_REST_URL') || env('KV_REST_API_URL'), token = env('UPSTASH_REDIS_REST_TOKEN') || env('KV_REST_API_TOKEN');
+  return url && token ? { url: url.replace(/\/+$/, ''), token } : null;
+};
+async function storeCmd(store, cmds) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 2000);
+  try {
+    const r = await fetch(store.url + '/pipeline', { method: 'POST', headers: { Authorization: `Bearer ${store.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(cmds), signal: ctl.signal });
+    const j = await r.json();
+    if (!r.ok || !Array.isArray(j)) throw new Error('저장소 응답 오류');
+    return j.map((x) => x && x.result);
+  } finally { clearTimeout(timer); }
+}
+async function reserve(name) {
+  const limit = quotaLimit(name), day = kstDay(), key = `caw:quota:${day}:${name}`;
+  const over = new ApiError(429, '오늘 이 정보의 조회 한도에 도달해 외부 조회를 멈췄어요. 내일 다시 시도해 주세요');
+  for (const k of QUOTA_LOCAL.keys()) if (!k.includes(day)) QUOTA_LOCAL.delete(k);
+  const local = (QUOTA_LOCAL.get(key) || 0) + 1;              // 1차: 이 서버 인스턴스 안에서의 합계
+  if (local > limit) throw over;
+  QUOTA_LOCAL.set(key, local);
+  const store = quotaStore();
+  if (!store) return;                                         // 공유 저장소 미설정: 인스턴스별 제한만 적용됨
+  let total;
+  try { total = Number((await storeCmd(store, [['INCR', key], ['EXPIRE', key, 172800]]))[0]); if (!Number.isFinite(total)) throw new Error('bad'); }
+  catch {                                                     // 2차: 모든 인스턴스 합계(원자적 INCR). 저장소 장애 시 기본은 호출 중단
+    if (env('QUOTA_FAIL_OPEN') === '1') return;
+    throw new ApiError(503, '호출량 확인 저장소에 연결하지 못해 외부 조회를 잠시 멈췄어요');
+  }
+  if (total > limit) throw over;
 }
 
 async function fetchText(url, headers = {}) {
+  await reserve(quotaFor(url));
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 8000);
   try {
@@ -38,7 +99,7 @@ async function fetchTago(url) {
   for (let i = 0; ; i++) {
     let t;
     try { t = await fetchText(url); }
-    catch (e) { if (i >= 2 || !/\(5\d\d\)|시간 초과/.test(e.message)) throw e; } // 포털 일시 오류(500 APPLICATION_ERROR 등)도 재시도
+    catch (e) { if (i >= 2 || e.status === 429 || e.status === 503 || !/\(5\d\d\)|시간 초과/.test(e.message)) throw e; } // 포털 일시 오류(500 APPLICATION_ERROR 등)만 재시도. 한도 초과는 재시도 안 함
     if (t !== undefined && (i >= 2 || !/"resultCode"\s*:\s*"?99\b/.test(t))) return t;
     await new Promise((r) => setTimeout(r, 700 * (i + 1)));
   }
@@ -198,19 +259,17 @@ async function drive(q) {
   inDaejeon(o[0], o[1], '출발지'); inDaejeon(d[0], d[1], '도착지');
   if (!env('KAKAO_REST_KEY') || env('MOCK') === '1') throw new ApiError(501, '카카오 길찾기 키가 없어 고정값을 사용합니다');
   if (Date.now() < driveBlockedUntil) throw new ApiError(503, '카카오 길찾기를 쓸 수 없어 고정값을 사용합니다 (권한 확인)');
-  const key = `drive:${o.map((v) => v.toFixed(3))}:${d.map((v) => v.toFixed(3))}`;
-  return cached(key, 5 * 60e3, async () => {
-    const u = new URL('https://apis-navi.kakaomobility.com/v1/directions');
-    u.searchParams.set('origin', `${o[1]},${o[0]}`);
-    u.searchParams.set('destination', `${d[1]},${d[0]}`);
-    u.searchParams.set('priority', 'RECOMMEND');
-    let j;
-    try { j = JSON.parse(await fetchText(u, { Authorization: `KakaoAK ${env('KAKAO_REST_KEY')}` })); }
-    catch (e) { driveBlockedUntil = Date.now() + 10 * 60e3; throw e; }
-    const r = j.routes && j.routes[0];
-    if (!r || r.result_code !== 0) throw new ApiError(502, '카카오 길찾기 결과 없음: ' + (r ? r.result_msg : ''));
-    return { durationSec: r.summary.duration, distanceM: r.summary.distance, taxiFare: r.summary.fare ? r.summary.fare.taxi : null };
-  });
+  // 카카오 길찾기 결과는 서버에 저장하지 않습니다(사용자 간 공유 캐시 금지). 요청마다 조회해 바로 돌려줍니다.
+  const u = new URL('https://apis-navi.kakaomobility.com/v1/directions');
+  u.searchParams.set('origin', `${o[1]},${o[0]}`);
+  u.searchParams.set('destination', `${d[1]},${d[0]}`);
+  u.searchParams.set('priority', 'RECOMMEND');
+  let j;
+  try { j = JSON.parse(await fetchText(u, { Authorization: `KakaoAK ${env('KAKAO_REST_KEY')}` })); }
+  catch (e) { if (e.status !== 429) driveBlockedUntil = Date.now() + 10 * 60e3; throw e; }
+  const r = j.routes && j.routes[0];
+  if (!r || r.result_code !== 0) throw new ApiError(502, '카카오 길찾기 결과 없음: ' + (r ? r.result_msg : ''));
+  return { durationSec: r.summary.duration, distanceM: r.summary.distance, taxiFare: r.summary.fare ? r.summary.fare.taxi : null, at: Date.now() };
 }
 
 /* ---------- 4. 브라우저에 줄 설정 (카카오 JavaScript 키는 원래 공개용) ---------- */
@@ -225,13 +284,12 @@ async function search(q) {
   const query = String(q.q || '').trim().slice(0, 60);
   if (!query) throw new ApiError(400, '검색어가 필요합니다');
   if (!env('KAKAO_REST_KEY')) throw new ApiError(501, '카카오 REST 키가 없어 검색할 수 없어요');
-  return cached(`search:${query}`, 10 * 60e3, async () => {
-    const u = new URL('https://dapi.kakao.com/v2/local/search/keyword.json');
-    u.searchParams.set('query', query); u.searchParams.set('x', '127.385'); u.searchParams.set('y', '36.350');
-    u.searchParams.set('radius', '20000'); u.searchParams.set('size', '10');
-    const j = JSON.parse(await fetchText(u, { Authorization: `KakaoAK ${env('KAKAO_REST_KEY')}` }));
-    return { places: (j.documents || []).map((d) => ({ name: d.place_name, address: d.road_address_name || d.address_name, lat: Number(d.y), lng: Number(d.x) })) };
-  });
+  // 카카오 검색 결과도 서버에 저장하지 않습니다. 같은 사용자의 세션 안 재사용은 브라우저(app.js)에서만 합니다.
+  const u = new URL('https://dapi.kakao.com/v2/local/search/keyword.json');
+  u.searchParams.set('query', query); u.searchParams.set('x', '127.385'); u.searchParams.set('y', '36.350');
+  u.searchParams.set('radius', '20000'); u.searchParams.set('size', '10');
+  const j = JSON.parse(await fetchText(u, { Authorization: `KakaoAK ${env('KAKAO_REST_KEY')}` }));
+  return { places: (j.documents || []).map((d) => ({ name: d.place_name, address: d.road_address_name || d.address_name, lat: Number(d.y), lng: Number(d.x) })) };
 }
 
 /* ---------- 6. 타슈 대여소 실시간 자전거 수 (타슈 Open API · api-token 헤더) ---------- */
@@ -295,9 +353,11 @@ async function rawFetch(url, headers = {}) {
   const timer = setTimeout(() => ctl.abort(), 8000);
   const t0 = Date.now();
   try {
+    await reserve(quotaFor(url));
     const r = await fetch(url, { headers, signal: ctl.signal });
     return { http: r.status, text: await r.text(), ms: Date.now() - t0 };
   } catch (e) {
+    if (e instanceof ApiError) return { http: 0, text: `(${e.message})`, ms: Date.now() - t0 };
     return { http: 0, text: e.name === 'AbortError' ? '(응답 시간 초과)' : `(연결 실패: ${e.message})`, ms: Date.now() - t0 };
   } finally { clearTimeout(timer); }
 }
@@ -440,15 +500,31 @@ async function health(q) {
     u.searchParams.set('serviceKey', env('DATA_GO_KR_KEY'));
     checks.push(await check('대전교통공사 열차시각표 (테스트 주소)', u.toString(), {}, (r) => ({ ok: r.http === 200, message: r.http === 200 ? '응답 받음 · 아래 원본을 보내 주시면 시각표 계산에 연결할게요' : `HTTP ${r.http}` })));
   }
+  // 하루 호출량 제한 상태 (공유 저장소가 있으면 전체 인스턴스 합계, 없으면 이 인스턴스 합계)
+  {
+    const names = Object.keys(QUOTA_DEFAULT), day = kstDay(), store = quotaStore();
+    const fmt = (vals) => names.map((n, k) => `${n} ${vals[k] || 0}/${quotaLimit(n)}`).join(', ');
+    let ok = true, message;
+    if (store) {
+      try { message = '공유 저장소 연결됨 · 오늘 전체 호출: ' + fmt(await storeCmd(store, names.map((n) => ['GET', `caw:quota:${day}:${n}`]))); }
+      catch (e) { ok = false; message = `공유 저장소 연결 실패 (${e.message}) — ${env('QUOTA_FAIL_OPEN') === '1' ? '제한 없이 통과 중' : '외부 조회가 멈춰 있어요'}`; }
+    } else message = '공유 저장소 미설정 → 서버 인스턴스별 합계만 제한됩니다 · 이 인스턴스: ' + fmt(names.map((n) => QUOTA_LOCAL.get(`caw:quota:${day}:${n}`)));
+    checks.push({ name: '하루 호출량 제한', ok, message, http: 0, ms: 0, url: '', raw: '' });
+  }
   return { keys, checks, at: new Date().toISOString() };
 }
 
 /* ---------- Vercel·로컬 서버 공용 래퍼 ---------- */
 const HITS = new Map(); // IP별 1분 호출 수 (서버 인스턴스마다 따로 셈 · 과다 호출 방지용)
 function rateLimited(req, perMin) {
-  const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim() || '?';
+  // 한도가 다른 API(점검 3·길찾기/검색 30·나머지 120)는 서로 따로 셈
+  const ip = `${perMin}|` + (String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim() || '?');
   const now = Date.now(), h = HITS.get(ip);
-  if (!h || now - h.t > 60e3) { HITS.set(ip, { t: now, n: 1 }); if (HITS.size > 5000) HITS.clear(); return false; }
+  if (!h || now - h.t > 60e3) {
+    if (HITS.size > 500) for (const [k, v] of HITS) if (now - v.t > 60e3) HITS.delete(k);   // 1분 지난 기록은 지움
+    if (HITS.size > 5000) HITS.clear();
+    HITS.set(ip, { t: now, n: 1 }); return false;
+  }
   return ++h.n > perMin;
 }
 // cacheSec: 성공 응답을 Vercel CDN에 그 시간만큼 저장 (같은 요청은 외부 API를 다시 부르지 않음)
