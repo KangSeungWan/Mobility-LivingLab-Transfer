@@ -140,3 +140,6 @@ details summary::-webkit-details-marker{display:none}
   .panel{flex:none;width:440px;max-width:none;margin:0;overflow:auto;border-left:1px solid var(--line)}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+/* 출발지 선택 (update10) */
+.presets{display:flex;flex-wrap:wrap;gap:6px;margin:-2px 0 2px}
+.presets .pm small{font-size:11px;font-weight:600;opacity:.7}

@@ -32,11 +32,13 @@ pre{margin:0;background:var(--surface);border-radius:10px;padding:10px;font-size
   <div class="row">
     <label for="arsId">정류장 번호 (선택)<input id="arsId" inputmode="numeric" placeholder="예: 정류장 표지판 5자리"></label>
     <label for="nodeId">TAGO 정류장 ID (선택)<input id="nodeId" placeholder="예: DJB8001793"></label>
+    <label for="lat">출발 위도 (선택)<input id="lat" inputmode="decimal" placeholder="기본: 공대 3호관"></label>
+    <label for="lng">출발 경도 (선택)<input id="lng" inputmode="decimal" placeholder="예: 127.3465"></label>
     <button class="btn" id="run">점검 시작</button>
     <button class="btn sub" id="copy" disabled>결과 전체 복사</button>
   </div>
   <div class="keys" id="keys"></div>
-  <div id="out" class="content"><p class="hint">'점검 시작'을 눌러 주세요. 10초 정도 걸려요.</p></div>
+  <div id="out" class="content"><p class="hint">'점검 시작'을 눌러 주세요. 10~20초 걸려요. 출발 좌표를 넣으면 그 위치 기준으로 정류장·길찾기를 점검해요.</p></div>
   <p class="hint"><a href="/">← 통학길 비교로 돌아가기</a></p>
 </div>
 <script>
@@ -48,6 +50,8 @@ document.getElementById('run').onclick = async () => {
   const p = new URLSearchParams();
   const a = document.getElementById('arsId').value.trim(), n = document.getElementById('nodeId').value.trim();
   if (a) p.set('arsId', a); if (n) p.set('nodeId', n);
+  const la = document.getElementById('lat').value.trim(), lo = document.getElementById('lng').value.trim();
+  if (la && lo) { p.set('lat', Number(la).toFixed(4)); p.set('lng', Number(lo).toFixed(4)); }   // 좌표는 소수 4자리까지만
   const tk = new URLSearchParams(location.search).get('token'); if (tk) p.set('token', tk); // 배포 환경: health.html?token=...
   try {
     const r = await fetch('/api/health?' + p); last = await r.json();
