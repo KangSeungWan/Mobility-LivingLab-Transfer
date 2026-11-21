@@ -156,3 +156,14 @@ details summary::-webkit-details-marker{display:none}
 .allow-in .pm{padding:4px 9px}
 .allow-err{margin:-2px 0 0;font-size:12px}
 @media (max-width:600px){.allow-in input{font-size:16px}}   /* 휴대폰: 16px 미만이면 입력할 때 화면이 확대됨 */
+
+/* 지도 경로 표시 (update14) — 지도 타일은 항상 밝은 색이라 다크 모드 변수(--ink 등)를 쓰지 않고 고정 색 사용 */
+.mk.rb{background:#0a0a0a;color:#fff;border:2px solid #fff;font-size:12px;font-weight:800;padding:3px 9px;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.mk.ra{background:#fff;color:#0a0a0a;border:2px solid #0a0a0a;font-size:12px;font-weight:800;padding:3px 9px;box-shadow:0 2px 6px rgba(0,0,0,.25)}
+.mk.rd{background:#12855a;color:#fff;border:2px solid #fff;font-size:12px;font-weight:800;padding:3px 9px;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.mapbtn{align-self:flex-start;font:inherit;font-size:12px;font-weight:800;padding:6px 11px;border-radius:999px;border:1.5px solid var(--line);background:var(--bg);color:var(--ink);cursor:pointer}
+.mapbtn.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.mapbtn:focus-visible{outline:2px solid var(--sub);outline-offset:2px}
+.maplegend{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
+.maplegend span{display:inline-flex;align-items:center;gap:5px}
+.maplegend i{display:inline-block;width:16px;height:4px;border-radius:2px}

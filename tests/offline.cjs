@@ -27,7 +27,7 @@ function loadApp({ fetchImpl, now, doc }) {
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/scenario.js'), 'utf8'), ctx);
   let src = fs.readFileSync(path.join(ROOT, 'public/app.js'), 'utf8');
-  src = src.replace(/\nstart\(\);\n\}\)\(\);\s*$/, '\nwindow.__T = { st, SC, computeRoutes, pickBest, loadStops, loadArrivals, loadDrives, setPoint, search, selectOrigin, stationNum, loadTimetables, loadTransit, loadHubs, tashuFee, stationFromPlace, routeKey, hubCands, pickHubs, render, setAllowCustom, setAllowFixed, parseAllow, routeShape, cleanPath, loadLegs };\n})();');
+  src = src.replace(/\nstart\(\);\n\}\)\(\);\s*$/, '\nwindow.__T = { st, SC, computeRoutes, pickBest, loadStops, loadArrivals, loadDrives, setPoint, search, selectOrigin, stationNum, loadTimetables, loadTransit, loadHubs, tashuFee, stationFromPlace, routeKey, hubCands, pickHubs, render, setAllowCustom, setAllowFixed, parseAllow, routeShape, cleanPath, loadLegs, drawRoute, mapRouteOf, clearRoute, showOnMap, setMap: (m) => { MAP = m; } };\n})();');
   vm.runInContext(src, ctx);
   return ctx.window.__T;
 }
@@ -1557,6 +1557,58 @@ function world(o = {}) {
     const gs = g ? u.S(g) : null, subs = gs ? gs.parts.filter((q) => q.mode === 'subway') : [];
     ok('M14-13 카카오 경로 밖 환승역: 직선 연결(approx) 후 카카오 지하철 좌표로 이어짐', subs.length === 2 && subs[0].approx && !subs[1].approx && D(subs[0].pts[0], GUAM) < 1 && gaps(gs) < 1, subs.map((q) => `${q.approx ? '~' : ''}${q.pts.length}`).join(' '));
     ok('M14-14 출발·목적지 좌표가 없으면 모양 없음(null) · 알 수 없는 경로 유형도 null', (() => { const o0 = u.w.T.st.origin; u.w.T.st.origin = { name: 'x' }; const a = u.S(u.by('taxi')); u.w.T.st.origin = o0; return a === null && u.S({ kind: 'zzz' }) === null && u.S(null) === null; })());
+  }
+
+  /* ===== update14 3단계: 지도에 경로 그리기 (가짜 지도 객체로 확인) (V14) ===== */
+  {
+    const P = { lat: 36.3640, lng: 127.3420 }, BUS0 = { lat: 36.3632, lng: 127.3428 }, BUS1 = { lat: 36.3633, lng: 127.3428 }, HEAD = { lat: 36.3632, lng: 127.3438 };
+    const HUB = { lat: 36.3610, lng: 127.3710 }, MID = { lat: 36.3500, lng: 127.4000 }, DST = { lat: 36.3324, lng: 127.4343 };
+    const ll = (...xs) => xs.map((q) => [q.lat, q.lng]);
+    const w = world({ cfg: { route: true }, api: {
+      '/api/transit': () => ({ at: 0, routes: [{ type: 'BUS_AND_SUBWAY', totalSec: 2600, fare: 1550, steps: [
+        { type: 'WALKING', sec: 180, m: 200, stops: [], vehicles: [], start: P, end: BUS0, path: ll(P, BUS0) },
+        { type: 'BUS', sec: 600, m: 3000, stops: ['궁동네거리', '유성구청', '갑천역'], vehicles: [{ name: '104', type: '일반' }], start: BUS1, head: HEAD, end: HUB, path: ll(BUS1, HEAD, HUB) },   // 도보 끝과 약 11m 어긋남
+        { type: 'SUBWAY', sec: 1500, m: 9000, stops: ['갑천', '월평', '대전역'], vehicles: [{ name: '1호선', type: '' }], start: HUB, end: DST, path: ll(HUB, MID, DST) }] }] }),
+      '/api/stops': () => ({ stops: [{ id: 'DJB_X', no: '41111', name: '궁동네거리', lat: BUS0.lat, lng: BUS0.lng }] }),
+      '/api/arrivals': (u, now) => ({ at: now.t, list: [{ routeNo: '104', routeId: 'DJBR104', arrSec: 600, prevCnt: 3 }] }),
+      '/api/subway': () => timetable(23),
+      '/api/drive': (u) => { const q = new URLSearchParams(u.split('?')[1]); return { durationSec: 1500, distanceM: 11000, taxiFare: 13000, path: [[+q.get('olat'), +q.get('olng')], [+q.get('olat'), +q.get('dlng')], [+q.get('dlat'), +q.get('dlng')]] }; },
+    } });
+    w.T.SC.bus.verifiedStops['104'] = ['DJB_X'];
+    w.T.st.subway = null; w.T.st.presetPos.haksa = { ...P };
+    w.T.st.origin = { key: 'haksa', name: '학사마을(시험)', lat: P.lat, lng: P.lng, verified: true }; w.T.st.originKey = 'haksa';
+    await w.T.loadStops();
+    const rec = { lines: [], labels: [], removed: 0, fits: 0 };
+    const fake = (kakao) => ({ kakao, polyline(pts, o) { rec.lines.push({ pts, o }); return { remove() { rec.removed++; } }; }, label(pos, cls, text) { rec.labels.push({ cls, text }); return { remove() { rec.removed++; } }; }, fit() { rec.fits++; } });
+    w.T.setMap(fake(true));
+    const reset = () => { rec.lines = []; rec.labels = []; rec.removed = 0; rec.fits = 0; };
+    const { list } = w.T.computeRoutes(), best = w.T.pickBest(list), tr = list.find((r) => r.kind === 'transit');
+    reset(); w.T.st.tab = 'compare'; w.T.render();
+    const shown = w.T.mapRouteOf(list, best), sh = w.T.routeShape(shown);
+    ok('V14-01 처음 화면: 추천 경로를 그림 (구간마다 흰 테두리+색 선 2개) · 승차·하차 표시 · 지도 범위 1번 맞춤', best && shown.id === best.id && rec.lines.length === sh.parts.length * 2 && rec.labels.some((x) => x.cls === 'rb') && rec.fits === 1, `${shown.name} · 선 ${rec.lines.length} · 표시 ${rec.labels.length}`);
+    reset(); w.T.render(); w.T.render();
+    ok('V14-02 30초 갱신(같은 모양): 다시 그리지 않음 · 지도 범위도 그대로 (사용자가 옮긴 화면 유지)', rec.lines.length === 0 && rec.removed === 0 && rec.fits === 0);
+    const taxi = list.find((r) => r.kind === 'taxi');
+    const prevCount = w.T.st.routeOverlays.length;
+    reset(); w.T.showOnMap(taxi.id);
+    ok('V14-03 카드의 "지도에서 보기": 이전 선·표시를 모두 지우고 택시 경로를 그림 · 범위 다시 맞춤', rec.removed === prevCount && rec.lines.length === 2 && rec.lines[1].o.color === '#a855f7' && rec.fits === 1 && w.T.st.mapSel === taxi.id, `지움 ${rec.removed}/${prevCount}`);
+    reset(); w.T.st.mapSel = tr.id; w.T.st.mapFitKey = null; w.T.render();
+    const colored = rec.lines.filter((x) => x.o.color !== '#ffffff');
+    ok('V14-04 수단별 색: 버스 코랄·지하철 파랑, 도보는 점선, 실제 좌표 구간은 실선', colored.some((x) => x.o.color === '#ff5530' && !x.o.dash) && colored.some((x) => x.o.color === '#1456f0' && !x.o.dash) && colored.filter((x) => x.o.color === '#6b7280').every((x) => x.o.dash), colored.map((x) => `${x.o.color}${x.o.dash ? '…' : ''}`).join(' '));
+    const tsh = w.T.routeShape(tr);
+    ok('V14-05 짧게 어긋난 구간(도보 끝↔버스 시작 약 11m)은 이어 붙임 (끊김 0)', tsh.parts.every((q, i) => i === 0 || (q.pts[0].lat === tsh.parts[i - 1].pts[tsh.parts[i - 1].pts.length - 1].lat && q.pts[0].lng === tsh.parts[i - 1].pts[tsh.parts[i - 1].pts.length - 1].lng)));
+    const offR = { ...taxi, id: 'offroute', avail: 'no' };
+    w.T.st.mapSel = 'offroute';
+    ok('V14-06 고른 경로가 이용 불가(또는 사라짐)면 추천 경로로 되돌아감', w.T.mapRouteOf([...list, offR], best).id === best.id && w.T.mapRouteOf(list, best).id === best.id);
+    reset(); w.T.st.tab = 'stops'; w.T.render();
+    ok('V14-07 주변 정류장 탭: 경로 선 지움', w.T.st.routeOverlays.length === 0 && rec.removed > 0);
+    w.T.st.tab = 'compare'; w.T.st.mapSel = taxi.id;
+    w.T.setPoint('dest', { name: '대전역 근처', lat: 36.3330, lng: 127.4340 });
+    ok('V14-08 출발·목적지를 바꾸면 고른 경로 선택은 초기화(추천으로)', w.T.st.mapSel === null);
+    w.T.clearRoute(); w.T.setMap(fake(false)); reset(); w.T.render();
+    ok('V14-09 카카오맵이 아니면(OpenStreetMap 대체) 경로 선을 그리지 않음 (약관 확인 전)', rec.lines.length === 0 && w.T.st.routeOverlays.length === 0);
+    w.T.setMap(null); reset();
+    ok('V14-10 지도가 없을 때(불러오기 실패·로딩 전)도 오류 없이 화면 계산', (() => { try { w.T.render(); return w.T.drawRoute(list[0]) === null; } catch (e) { return false; } })());
   }
 
   console.log(`\n결과: 통과 ${pass} / 실패 ${fail}`);

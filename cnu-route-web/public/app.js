@@ -22,6 +22,7 @@ const st = {
   routeInfo: {},                                                       // 버스 노선·경유 정류장(TAGO, 공공 데이터) — 노선 번호별, 이 세션 동안 사용
   stops: [], stopsErr: null, arr: {}, drive: {}, cfg: { mock: true, drive: false }, loading: false, updated: null,
   map: null, overlays: {}, stopOverlays: [], open: new Set(),
+  mapSel: null, routeOverlays: [], mapSig: null, mapFitKey: null,   // 지도 경로 표시 (update14): 사용자가 고른 경로 id · 그려진 선 · 같은 모양이면 다시 안 그림 · 같은 경로면 다시 맞추지 않음
   gen: 0, arrBusy: 0, tashuAt: 0,
 };
 const $ = (s) => document.querySelector(s);
@@ -125,6 +126,13 @@ const kakaoAdapter = {
     o.setMap(this.map); return { remove: () => o.setMap(null) };
   },
   fit(pts) { const k = window.kakao.maps, b = new k.LatLngBounds(); pts.forEach((p) => b.extend(new k.LatLng(p.lat, p.lng))); this.map.setBounds(b, 40, 40, 40, 40); },
+  // 경로 선 (update14): 카카오맵 Polyline
+  polyline(pts, o) {
+    const k = window.kakao.maps;
+    const l = new k.Polyline({ path: pts.map((p) => new k.LatLng(p.lat, p.lng)), strokeWeight: o.weight, strokeColor: o.color, strokeOpacity: o.opacity, strokeStyle: o.dash ? 'shortdash' : 'solid', zIndex: o.z || 0 });
+    l.setMap(this.map); return { remove: () => l.setMap(null) };
+  },
+  kakao: true,
 };
 const leafletAdapter = {
   async load() {
@@ -143,13 +151,16 @@ const leafletAdapter = {
     return { remove: () => m.remove() };
   },
   fit(pts) { this.map.fitBounds(pts.map((p) => [p.lat, p.lng]), { padding: [40, 40] }); },
+  // 경로 선은 그리지 않음 (update14): 카카오 길찾기 결과를 다른 지도(OpenStreetMap) 위에 표시하는 것은 약관 확인 전이라 카카오맵에서만
+  polyline() { return { remove() {} }; },
+  kakao: false,
 };
 let MAP = null;
 async function initMap() {
   const onClick = (lat, lng) => setPoint(st.pick, { name: '지도에서 선택한 위치', lat, lng }, true);
   const tries = st.cfg.kakaoJsKey ? [[kakaoAdapter, st.cfg.kakaoJsKey], [leafletAdapter]] : [[leafletAdapter]];
   for (const [ad, key] of tries) {
-    try { await ad.load(key); ad.init($('#map'), st.origin, onClick); MAP = ad; drawPoints(true); return; } catch { /* 다음 지도로 */ }
+    try { await ad.load(key); ad.init($('#map'), st.origin, onClick); MAP = ad; drawPoints(true); if (st.tab === 'compare') render(); return; } catch { /* 다음 지도로 */ }
   }
   mapEmpty('지도를 불러오지 못했어요', '인터넷 연결을 확인하세요. 지도 없이도 아래 비교는 동작합니다.');
 }
@@ -174,6 +185,7 @@ function drawStops() {
 // 출발지·목적지가 바뀌면 이전 위치로 계산한 결과는 모두 버림 (늦게 도착한 옛 응답도 tripKey가 달라 적용되지 않음)
 //   근처 지하철역(환승역 후보)은 출발지에만 달려 있어 목적지만 바뀌면 그대로 둠 (카카오 호출 절약)
 function invalidate(which) {
+  st.mapSel = null;
   st.plans = []; st.plansAt = 0; st.planWhy = null; st.routeCount = 0; st.extraStops = []; st.legs = {}; st.tashuNear = {}; st.drive = {};
   if (which === 'origin') { st.stops = []; st.arr = {}; st.tashu = null; st.tashuAt = 0; st.hubSearch = []; st.hubsWhy = null; }
 }
@@ -1246,10 +1258,60 @@ function routeShape(r) {
     subway(r.hub); tail();
   } else return null;
   if (!parts.length) return null;
+  // 앞 구간 끝과 다음 구간 시작이 조금(30m 미만) 어긋나면 이어 붙임 (카카오 도보 끝·정류장 좌표 차이로 생기는 짧은 끊김)
+  for (let i = 1; i < parts.length; i++) {
+    const a = parts[i - 1].pts[parts[i - 1].pts.length - 1], b = parts[i].pts[0];
+    if ((a.lat !== b.lat || a.lng !== b.lng) && dist(a, b) < SHAPE_NEAR_M) parts[i] = { ...parts[i], pts: [a, ...parts[i].pts] };
+  }
+  // 표시 겹침 줄이기: 바로 다음 승차 지점(200m 이내)이 있는 하차 표시는 생략, 출발지와 같은 곳(30m 이내)의 승차 표시는 생략('출발' 표시와 겹침)
+  const keep = marks.filter((k, i) => !(k.kind === 'alight' && marks.slice(i + 1).some((x) => x.kind === 'board' && dist(x.pt, k.pt) < 200))
+    && !(k.kind === 'board' && dist(k.pt, st.origin) < SHAPE_NEAR_M));
+  marks.length = 0; marks.push(...keep);
   marks.unshift({ pt: ptOf(st.origin), kind: 'origin', label: st.origin.name || '출발' });
   marks.push({ pt: ptOf(st.dest), kind: 'dest', label: st.dest.name || '도착' });
   return { parts, marks };
 }
+/* ---------------- 지도에 경로 그리기 (update14 3단계) ---------------- */
+// 기본은 추천 경로(없으면 비교 기준 → 이용 가능한 첫 경로). 카드의 '지도에서 보기'로 바꿀 수 있음. 이용 불가 경로는 그리지 않음
+const MODE_STYLE = { walk: { color: '#6b7280', weight: 4 }, bus: { color: '#ff5530', weight: 6 }, subway: { color: '#1456f0', weight: 6 }, bike: { color: '#12855a', weight: 6 }, taxi: { color: '#a855f7', weight: 6 } };
+const MODE_NAME = { walk: '도보', bus: '버스', subway: '지하철', bike: '타슈', taxi: '택시' };
+const MARK_CLS = { board: 'rb', alight: 'ra', dock: 'rd' };
+const canDrawRoute = () => !!(MAP && MAP.kakao);
+function mapRouteOf(list, best) {
+  const usable = (r) => r && r.avail !== 'no';
+  const sel = list.find((r) => r.id === st.mapSel);
+  return (usable(sel) && sel) || (usable(best) && best) || list.find((r) => r.baseline && usable(r)) || list.find((r) => r.avail === 'ok') || null;
+}
+function clearRoute() {
+  st.routeOverlays.forEach((o) => { try { o.remove(); } catch { /* 이미 지워짐 */ } });
+  st.routeOverlays = []; st.mapSig = null;
+}
+function drawRoute(r) {
+  if (!canDrawRoute() || !r) { clearRoute(); return null; }
+  const sh = routeShape(r);
+  if (!sh) { clearRoute(); return null; }
+  const sig = r.id + '|' + JSON.stringify(sh);
+  if (sig === st.mapSig) return sh;                       // 30초 갱신에서 모양이 같으면 다시 그리지 않음 (깜빡임 방지)
+  clearRoute();
+  const add = (o) => st.routeOverlays.push(o);
+  for (const q of sh.parts) {                             // 흰 테두리 → 색 선 (approx: 좌표가 없어 직선으로 이은 구간은 점선·연하게)
+    const m = MODE_STYLE[q.mode] || MODE_STYLE.walk;
+    add(MAP.polyline(q.pts, { color: '#ffffff', weight: m.weight + 3, opacity: q.approx ? 0.5 : 0.9, z: 1 }));
+    add(MAP.polyline(q.pts, { color: m.color, weight: m.weight, opacity: q.approx ? 0.6 : 0.95, dash: q.approx || q.mode === 'walk', z: 2 }));
+  }
+  for (const k of sh.marks) if (MARK_CLS[k.kind]) add(MAP.label(k.pt, MARK_CLS[k.kind], escapeHtml(k.label)));
+  st.mapSig = sig;
+  const fitKey = tripKey() + '|' + r.id;                  // 출발·목적지나 고른 경로가 바뀔 때만 지도 범위를 맞춤 (사용자가 옮긴 화면을 30초마다 되돌리지 않음)
+  if (st.mapFitKey !== fitKey) { MAP.fit([...sh.parts.flatMap((q) => q.pts), st.origin, st.dest]); st.mapFitKey = fitKey; }
+  return sh;
+}
+function showOnMap(id) {
+  st.mapSel = id; st.mapFitKey = null;
+  render();
+  const m = $('#map');
+  if (m && m.getBoundingClientRect && m.scrollIntoView && m.getBoundingClientRect().bottom < 60) m.scrollIntoView({ behavior: 'smooth', block: 'start' });   // 휴대폰에서 지도가 화면 위로 지나갔으면 올려서 보여 줌
+}
+
 const minsVs = (r, base) => Math.round((r.arrive - base.arrive) / 60000);
 // 도착 시각(화면에 보이는 분) → 요금 순서 (같으면 원래 순서 유지)
 const byArriveFare = (a, b) => Math.floor(a.arrive / 60000) - Math.floor(b.arrive / 60000) || (a.fare ?? Infinity) - (b.fare ?? Infinity);
@@ -1269,7 +1331,7 @@ function segBar(r, maxMin) {
   r.steps.forEach((s) => segs.append(h('i', { class: s.live ? 'live' : null, style: `flex:${Math.max(s.min, 0.2)} 1 0;background:var(--${s.type})`, title: `${SEG[s.type]} ${Math.round(s.min)}분` })));
   return h('div', { class: 'track', style: `width:${Math.min(100, (r.total / maxMin) * 100)}%` }, segs);
 }
-function routeCard(r, rank, base, bestId, maxMin) {
+function routeCard(r, rank, base, bestId, maxMin, mapId) {
   const off = r.avail === 'no', unk = r.avail === 'unknown';
   const fareTxt = (f) => (f == null ? '요금 미확인' : won(f));
   const pills = [];
@@ -1305,6 +1367,7 @@ function routeCard(r, rank, base, bestId, maxMin) {
       h('span', { class: 'mins' }, off ? '' : `${Math.round(r.total)}분${r.plus ? '+' : ''}`), h('span', { class: 'fare' }, fareTxt(r.fare))),
     off ? null : segBar(r, maxMin),
     h('div', { class: 'pills' }, pills),
+    !off && canDrawRoute() ? h('button', { type: 'button', class: 'mapbtn' + (r.id === mapId ? ' on' : ''), 'aria-pressed': String(r.id === mapId), onclick: () => showOnMap(r.id) }, r.id === mapId ? '지도에 표시 중' : '지도에서 보기') : null,
     h('details', { open: st.open.has(r.id), ontoggle: (e) => { if (e.target.open) st.open.add(r.id); else st.open.delete(r.id); } }, h('summary', null, '단계별 시각 보기'), tl));
 }
 const allowLabel = (a) => (a == null ? '상관없음' : a === 0 ? '0원' : `+${won(a)}`);
@@ -1344,6 +1407,7 @@ function exclusionText(transitAll) {
 }
 function renderCompare(c) {
   if (!supported()) {
+    clearRoute();
     const names = SC.origins.map((p) => p.name).join(' · ');
     c.append(h('div', { class: 'empty' }, h('b', null, `지금은 지원 출발지(${names}) ${R / 1000}km 안 → ${SC.dest.name} 구간만 비교할 수 있어요.`),
       h('p', { style: 'margin:6px 0 10px' }, '위의 출발지 버튼을 누르거나, 다른 위치는 "주변 정류장 실시간" 탭에서 버스 도착정보를 볼 수 있습니다. 대전 전역 경로 비교는 다음 단계에서 추가됩니다.'),
@@ -1352,6 +1416,7 @@ function renderCompare(c) {
   }
   const { list, baseline, hubs, transitAll } = computeRoutes(st.allow);
   const best = pickBest(list, st.allow);
+  const onMap = mapRouteOf(list, best);
   const maxMin = Math.max(60, ...list.filter((r) => r.avail !== 'no').map((r) => r.total));
   const allowBox = h('div', { class: 'allow', role: 'group', 'aria-label': '추가 비용 허용 범위' }, h('span', null, '추가 비용'),
     ...(SC.allowances || [0]).map((a) => { const on = !st.allowCustom && st.allow === a; return h('button', { type: 'button', class: 'pm' + (on ? ' on' : ''), 'aria-pressed': String(on), onclick: () => setAllowFixed(a) }, allowLabel(a)); }),
@@ -1372,7 +1437,9 @@ function renderCompare(c) {
       : `지금(${clock(Date.now())}) 출발 기준`),
     noBest ? h('p', { class: 'banner' }, noBest) : null,
     h('div', { class: 'legend' }, ...['walk', 'wait', 'ride', 'dock', 'sub'].map((k) => h('span', null, h('i', { style: `background:var(--${k})` }), SEG[k]))),
-    ...list.map((r, i) => routeCard(r, i + 1, baseline, best && best.id, maxMin)),
+    canDrawRoute() && onMap ? h('p', { class: 'hint maplegend' }, h('b', null, `지도: ${onMap.id === (best && best.id) ? '추천 경로' : onMap.name}`),
+      ...['walk', 'bus', 'subway', 'bike', 'taxi'].map((k) => h('span', null, h('i', { style: `background:${MODE_STYLE[k].color}` }), MODE_NAME[k])), h('span', null, '점선: 도보·좌표 없는 구간(직선)')) : null,
+    ...list.map((r, i) => routeCard(r, i + 1, baseline, best && best.id, maxMin, onMap && onMap.id)),
     h('p', { class: 'note' }, st.plans.length
       ? `일반 대중교통: 카카오 대중교통 길찾기 경로 ${st.routeCount}개에서 같은 경로를 합치고, ${st.plans.length}개를 실시간 버스 도착·열차 시각표로 다시 계산해 도착 순 ${transitCnt}개를 보여 줘요 (카카오 전체 소요시간은 쓰지 않음).`
       : `${st.planWhy || '대중교통 길찾기 정보 없음'} → ${legacyOrigin() ? `기존 고정 경로(${SC.bus.routeNo}번 → ${SC.hub.name})` : `기본 환승역(${SC.hub.name}) 기준 추정`}으로 계산했어요.`),
@@ -1380,6 +1447,7 @@ function renderCompare(c) {
     st.origin.verified === false ? h('p', { class: 'note' }, `출발지 '${st.origin.name}' 좌표는 아직 확인 전이에요${st.origin.from ? ` (카카오 장소 검색 1순위: ${st.origin.from})` : ''}.`) : null,
     h('p', { class: 'note' }, `지하철은 대전교통공사 열차시각표(평일·휴일, 역 구간별) 기준이고 공휴일은 평일 시각표로 계산돼요. 버스 방향은 국토교통부 버스노선정보의 경유 정류장 순서로 자동 확인하고(실시간 차량의 노선 ID까지 대조), 자동 확인이 안 되면 팀이 확인한 노선·정류장 목록에 있을 때만 '확인됨'이에요. 역내 이동·택시 호출 대기·타슈 대여/반납은 가정값입니다.`),
   ].filter(Boolean));
+  drawRoute(onMap);
 }
 function renderStops(c) {
   if (st.tashu && st.tashu.stations.length) {
@@ -1416,27 +1484,8 @@ function render() {
   $('#tabCompare').classList.toggle('on', st.tab === 'compare'); $('#tabCompare').setAttribute('aria-selected', st.tab === 'compare');
   $('#tabStops').classList.toggle('on', st.tab === 'stops'); $('#tabStops').setAttribute('aria-selected', st.tab === 'stops');
   if (st.tab === 'compare') renderCompare(c); else renderStops(c);
-  if (st.tab === 'compare') shapeDebug();
+  if (st.tab !== 'compare') clearRoute();             // 주변 정류장 탭에서는 경로 선을 지움
   $('#updated').textContent = st.updated ? `버스 도착정보 ${clock(st.updated)} 기준 · 30초마다 자동 갱신` : '';
-}
-
-// 지도 표시 2단계 확인용 (update14): 내 PC(localhost)에서 주소에 ?debug=shape 를 붙이면 경로별 모양 요약을 개발자도구 콘솔에 출력
-//   (화면·배포에는 영향 없음 · 3단계에서 지도에 그리면 제거 예정)
-function shapeDebug() {
-  try {
-    if (!['localhost', '127.0.0.1'].includes(location.hostname) || !/[?&]debug=shape\b/.test(location.search || '')) return;
-    const m = (a, b) => Math.round(dist(a, b));
-    const rows = computeRoutes(st.allow).list.map((r) => {
-      const sh = routeShape(r);
-      if (!sh) return { 경로: r.name, 부제: r.sub, 모양: '없음' };
-      let gap = 0; for (let i = 1; i < sh.parts.length; i++) { const a = sh.parts[i - 1].pts, b = sh.parts[i].pts; gap = Math.max(gap, m(a[a.length - 1], b[0])); }
-      const lp = sh.parts[sh.parts.length - 1].pts;
-      return { 경로: r.name, 부제: r.sub, 구간: sh.parts.map((q) => `${q.mode}${q.approx ? '(직선)' : ''}:${q.pts.length}`).join(' → '),
-        '출발지와 거리(m)': m(sh.parts[0].pts[0], st.origin), '도착지와 거리(m)': m(lp[lp.length - 1], st.dest), '구간 끊김 최대(m)': gap, 표시: sh.marks.map((x) => x.label).join(' / ') };
-    });
-    console.log(`[지도 모양 확인] ${clock(Date.now())} · ${st.origin.name} → ${st.dest.name}`);
-    console.table(rows);
-  } catch (e) { console.warn('[지도 모양 확인] 오류', e); }
 }
 
 /* ---------------- 검색 (카카오 로컬 · 서버에서 REST 키 사용) ---------------- */
