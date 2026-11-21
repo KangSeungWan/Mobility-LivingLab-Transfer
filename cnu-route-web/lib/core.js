@@ -484,7 +484,7 @@ async function drive(q) {
   // 숫자로 바꾸기 전에 null·빈값을 걸러 냄 (Number(null)=0 방지) — fin/nn은 아래 경로 조회 부분에 정의
   const sm = r.summary || {}, dur = fin(sm.duration), dis = nn(sm.distance), fare = fin(sm.fare && sm.fare.taxi);
   if (!(dur != null && dur > 0) || dis == null) throw new ApiError(502, '카카오 길찾기 응답의 시간·거리가 올바르지 않아요');   // null·음수는 정상 응답으로 쓰지 않음
-  return { durationSec: dur, distanceM: dis, taxiFare: fare != null && fare > 0 ? fare : null, at: Date.now() };
+  return { durationSec: dur, distanceM: dis, taxiFare: fare != null && fare > 0 ? fare : null, path: drivePath(r), at: Date.now() };   // path: 지도 표시용 (update14)
 }
 
 /* ---------- 4. 브라우저에 줄 설정 (카카오 JavaScript 키는 원래 공개용) ---------- */
@@ -581,6 +581,50 @@ function sideOf(a, head, p) {
   return Math.abs(lateral) < 2 ? null : lateral < 0 ? 'right' : 'left';
 }
 function headPt(pts) { const a = pt(pts[0]); if (!a) return null; for (const q of pts.slice(1, 60)) { const b = pt(q); if (b && meters(a, b) >= 15) return b; } return null; }
+// 지도 표시용 경로 좌표 (update14): 카카오 경로 좌표([경도,위도] 목록)를 화면에 그릴 만큼만 줄여서 [[위도,경도], …]로 돌려줌
+//   비정상 좌표(한국 범위 밖·숫자 아님)는 버리고, 연속 중복 제거 → 직선에 가까운 점 생략(허용 오차 PATH_TOL_M) → 그래도 많으면 고르게 솎기(양 끝 유지)
+//   소수 5자리(약 1m)로 반올림. 점이 2개 미만이면 null (경로 표시만 생략, 시간·요금 계산에는 영향 없음)
+const PATH_TOL_M = 5, PATH_MAX = { step: 60, leg: 150, drive: 150 };
+function simplifyPath(raw, max) {
+  if (!Array.isArray(raw)) return null;
+  const a = [];
+  for (const q of raw) { const p = pt(q); if (p && !(a.length && a[a.length - 1].lat === p.lat && a[a.length - 1].lng === p.lng)) a.push(p); }
+  if (a.length < 2) return null;
+  // 더글러스-포이커 (반복문, 평면 근사 미터 단위)
+  const kx = Math.cos(a[0].lat * Math.PI / 180) * 111320, ky = 110540;
+  const xy = a.map((p) => [p.lng * kx, p.lat * ky]), keep = new Uint8Array(a.length);
+  keep[0] = keep[a.length - 1] = 1;
+  const stack = [[0, a.length - 1]];
+  while (stack.length) {
+    const [s0, e0] = stack.pop();
+    const [x1, y1] = xy[s0], [x2, y2] = xy[e0], dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy);
+    let best = -1, bi = -1;
+    for (let k = s0 + 1; k < e0; k++) {
+      const [x, y] = xy[k];
+      const d = L < 1e-9 ? Math.hypot(x - x1, y - y1) : Math.abs(dy * x - dx * y + x2 * y1 - y2 * x1) / L;
+      if (d > best) { best = d; bi = k; }
+    }
+    if (bi > 0 && best > PATH_TOL_M) { keep[bi] = 1; stack.push([s0, bi], [bi, e0]); }
+  }
+  let out = a.filter((_, k) => keep[k]);
+  if (out.length > max) { const n = out.length, pick = []; for (let k = 0; k < max; k++) pick.push(out[Math.round(k * (n - 1) / (max - 1))]); out = pick; }
+  return out.map((p) => [Math.round(p.lat * 1e5) / 1e5, Math.round(p.lng * 1e5) / 1e5]);
+}
+// 카카오모빌리티(택시) 응답: sections[].roads[].vertexes = [x1, y1, x2, y2, …] (경도·위도 번갈아)
+function drivePath(route) {
+  const raw = [];
+  for (const sec of (route && route.sections) || []) for (const rd of (sec && sec.roads) || []) {
+    const v = rd && rd.vertexes; if (!Array.isArray(v)) continue;
+    for (let k = 0; k + 1 < v.length; k += 2) raw.push([v[k], v[k + 1]]);
+  }
+  return simplifyPath(raw, PATH_MAX.drive);
+}
+// 카카오맵 도보·자전거 응답: route.legs[].steps[].path.points
+function legPath(j) {
+  const raw = [];
+  for (const lg of (j && j.route && j.route.legs) || []) for (const st of (lg && lg.steps) || []) { const pts = st && st.path && st.path.points; if (Array.isArray(pts)) raw.push(...pts); }
+  return simplifyPath(raw, PATH_MAX.leg);
+}
 // 대중교통 응답 → 필요한 항목만. 시간은 초. totalSec은 참고용(대기 포함 여부가 명세에 없음) — 화면은 구간 시간만 씁니다.
 function parseTransit(j) {
   const routes = (j.routes || []).map((r) => {
@@ -597,6 +641,7 @@ function parseTransit(j) {
           stops: (sp.stops || []).map((x) => String((x && x.name) || '')),
           vehicles: (sp.vehicles || []).map((v) => ({ name: String((v && v.name) || ''), type: String((v && v.type) || '') })),
           start: pt(pts[0]), head: headPt(pts), end: pt(pts[pts.length - 1]),
+          path: simplifyPath(pts, PATH_MAX.step),   // 지도 표시용 (update14)
         };
       }),
     };
@@ -612,7 +657,7 @@ function parseLeg(j) {
   const p = (j.route && j.route.properties) || {};
   const sec = nn(p.totalTime), m = nn(p.totalDistance);
   if (sec == null || m == null) throw new ApiError(502, '카카오 길찾기 응답의 소요시간·거리가 올바르지 않아요');
-  return { sec, m };
+  return { sec, m, path: legPath(j) };   // path: 지도 표시용 (update14), 없으면 null
 }
 async function walk(q) { return { at: Date.now(), ...parseLeg(await kakaoRoute('walk', q)) }; }
 async function bike(q) { return { at: Date.now(), ...parseLeg(await kakaoRoute('bike', q)) }; }
@@ -804,7 +849,8 @@ async function health(q) {
     checks.push(await check('카카오모빌리티 길찾기 (택시)', u, { Authorization: `KakaoAK ${env('KAKAO_REST_KEY')}` }, (r) => {
       if (r.http !== 200) return { ok: false, message: `HTTP ${r.http} — REST 키 또는 길찾기 사용 권한을 확인하세요` };
       const j = JSON.parse(r.text); const s = j.routes && j.routes[0] && j.routes[0].summary;
-      return s ? { ok: true, message: `정상 · 공대→대전역 ${Math.round(s.duration / 60)}분, 택시 ${s.fare && s.fare.taxi}원` } : { ok: false, message: '경로 없음' };
+      const dp = s ? drivePath(j.routes[0]) : null;
+      return s ? { ok: true, message: `정상 · 공대→대전역 ${Math.round(s.duration / 60)}분, 택시 ${s.fare && s.fare.taxi}원 · 지도용 경로 좌표 ${dp ? dp.length : 0}점` } : { ok: false, message: '경로 없음' };
     }));
   }
 
@@ -835,7 +881,8 @@ async function health(q) {
       if (r.http !== 200) return { ok: false, message: `HTTP ${r.http} — REST 키, 앱의 [카카오맵] 사용 설정(ON), 하루 무료량(1,000건)을 확인하세요` };
       const j = JSON.parse(r.text);
       if (j.status !== 'OK') return { ok: false, message: `status ${j.status} — ${ROUTE_STATUS[j.status] || ''}` };
-      return { ok: true, message: `정상 · 경로 ${parseTransit(j).length}개 · properties ${JSON.stringify(j.properties || {}).slice(0, 200)}` };
+      const pr = parseTransit(j), pc = pr.map((rt) => rt.steps.reduce((a, st) => a + (st.path ? st.path.length : 0), 0)), noPath = pr.reduce((a, rt) => a + rt.steps.filter((st) => !st.path).length, 0);
+      return { ok: true, message: `정상 · 경로 ${pr.length}개 · 지도용 경로 좌표(경로별) ${pc.join('/')}점 · 좌표 없는 구간 ${noPath}개 · properties ${JSON.stringify(j.properties || {}).slice(0, 200)}` };
     });
     checks.push(tc);
     let routes = [];
@@ -869,7 +916,7 @@ async function health(q) {
         const j = JSON.parse(r.text);
         if (j.status !== 'OK') return { ok: false, message: `status ${j.status} — ${ROUTE_STATUS[j.status] || ''}` };
         const g = parseLeg(j);
-        return { ok: true, message: `정상 · ${Math.round(g.sec / 60)}분 (${g.sec}초) · ${g.m}m` };
+        return { ok: true, message: `정상 · ${Math.round(g.sec / 60)}분 (${g.sec}초) · ${g.m}m · 지도용 경로 좌표 ${g.path ? g.path.length : 0}점` };
       }));
     }
     // 출발지 좌표 확인: 카카오 장소 검색 상위 3건 (scenario.js origins에 넣을 좌표)
@@ -973,4 +1020,4 @@ function handler(fn, { cacheSec = 0, perMin = 120 } = {}) {
   };
 }
 
-module.exports = { nearbyStops, arrivals, arrivalsDaejeon, busRoute, stationDist, subway, drive, config, search, stations, transit, walk, bike, tashu, health, handler, ApiError, _test: { parseTransit, parseLeg, quotaFor, parseStnDist, xmlTree, checkDistItem } };
+module.exports = { nearbyStops, arrivals, arrivalsDaejeon, busRoute, stationDist, subway, drive, config, search, stations, transit, walk, bike, tashu, health, handler, ApiError, _test: { simplifyPath, drivePath, legPath, parseTransit, parseLeg, quotaFor, parseStnDist, xmlTree, checkDistItem } };

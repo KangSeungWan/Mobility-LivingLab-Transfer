@@ -1437,6 +1437,52 @@ function world(o = {}) {
     ok('U13-07 로컬 server.js: /api/config 200 · 없는 API 404 · 화면 200', g1.status === 200 && JSON.parse(g1.b).mock === true && g2.status === 404 && g3.status === 200, `${g1.status}/${g2.status}/${g3.status}`);
   }
 
+  /* ===== update14 1단계: 지도 표시용 경로 좌표 (서버 응답에 path 추가 · 화면 변경 없음) (S14) ===== */
+  {
+    for (const k of Object.keys(require.cache)) if (k.includes('cnu-route-web')) delete require.cache[k];
+    Object.assign(process.env, { MOCK: '0', KAKAO_REST_KEY: 'fake' });
+    const C = require(path.join(ROOT, 'lib/core.js')), T14 = C._test;
+    // 직선 위 100점 + 꺾이는 점 → 양 끝과 꺾이는 점만 남음
+    const line = []; for (let i = 0; i <= 100; i++) line.push([127.34 + i * 0.0001, 36.36]);
+    for (let i = 1; i <= 50; i++) line.push([127.35, 36.36 + i * 0.0001]);
+    const sp = T14.simplifyPath(line, 60);
+    ok('S14-01 직선 구간은 점 생략: 151점 → 꺾이는 점 포함 3점, [위도,경도] 순서', sp.length === 3 && sp[0][0] === 36.36 && sp[0][1] === 127.34 && sp[1][0] === 36.36 && sp[1][1] === 127.35 && sp[2][0] === 36.365, JSON.stringify(sp));
+    const zig = []; for (let i = 0; i < 500; i++) zig.push([127.30 + i * 0.0002, 36.30 + (i % 2) * 0.001]);
+    const sz = T14.simplifyPath(zig, 60);
+    ok('S14-02 점이 많으면 상한(60)까지 고르게 솎고 양 끝 유지', sz.length === 60 && sz[0][1] === 127.3 && sz[59][1] === Math.round((127.30 + 499 * 0.0002) * 1e5) / 1e5, sz.length);
+    const bad = T14.simplifyPath([[127.34, 36.36], null, ['x', 1], [0, 0], [127.34, 36.36], [200, 36], [127.35, 36.37], '12'], 60);
+    ok('S14-03 비정상 좌표(null·문자·0,0·범위 밖)·연속 중복은 버림', JSON.stringify(bad) === JSON.stringify([[36.36, 127.34], [36.37, 127.35]]), JSON.stringify(bad));
+    ok('S14-04 점이 2개 미만·배열 아님 → null', T14.simplifyPath([[127.34, 36.36]], 60) === null && T14.simplifyPath(null, 60) === null && T14.simplifyPath('abc', 60) === null && T14.simplifyPath([[127.34, 36.36], [127.34, 36.36]], 60) === null);
+    const r5 = T14.simplifyPath([[127.123456789, 36.987654321], [127.2, 36.9]], 60);
+    ok('S14-05 소수 5자리 반올림 (약 1m)', r5[0][0] === 36.98765 && r5[0][1] === 127.12346, JSON.stringify(r5));
+    // 택시: sections[].roads[].vertexes
+    const dp = T14.drivePath({ sections: [{ roads: [{ vertexes: [127.34, 36.36, 127.345, 36.36] }, { vertexes: [127.345, 36.36, 127.35, 36.365, 'x'] }, { vertexes: null }] }, null] });
+    ok('S14-06 택시 경로: vertexes(경도,위도 번갈아) → [위도,경도], 홀수·null 무시', Array.isArray(dp) && dp.length === 3 && dp[0][0] === 36.36 && dp[2][1] === 127.35, JSON.stringify(dp));
+    ok('S14-07 택시 경로 없음 → null', T14.drivePath({}) === null && T14.drivePath(null) === null && T14.drivePath({ sections: [{ roads: [{}] }] }) === null);
+    // 도보·자전거: route.legs[].steps[].path.points
+    const lj = { status: 'OK', route: { properties: { totalTime: 300, totalDistance: 400 }, legs: [{ steps: [{ path: { points: [[127.34, 36.36], [127.341, 36.36]] } }, { path: { points: [[127.341, 36.36], [127.341, 36.362]] } }, { path: null }] }] } };
+    const lg = T14.parseLeg(lj);
+    ok('S14-08 도보·자전거 응답에 path 추가 (구간 이어 붙임 · 중복 제거) · sec·m 그대로', lg.sec === 300 && lg.m === 400 && Array.isArray(lg.path) && lg.path.length === 3, JSON.stringify(lg));
+    const lg0 = T14.parseLeg({ route: { properties: { totalTime: 60, totalDistance: 50 } } });
+    ok('S14-09 도보·자전거 좌표 없음 → path null, 시간·거리는 정상', lg0.path === null && lg0.sec === 60 && lg0.m === 50);
+    // 대중교통: steps[].path
+    const tj = { status: 'OK', routes: [{ properties: { type: 'BUS', totalTime: 900, totalDistance: 3000, transfers: 0, fare: { value: 1500 } }, steps: [
+      { properties: { type: 'WALKING', time: 120, distance: 100, stops: [], vehicles: [] }, path: { points: [[127.346, 36.365], [127.3455, 36.3652]] } },
+      { properties: { type: 'BUS', time: 600, distance: 2800, stops: [{ name: 'A' }, { name: 'B' }], vehicles: [{ name: '108', type: '일반' }] }, path: { points: line } },
+      { properties: { type: 'WALKING', time: 60, distance: 50, stops: [], vehicles: [] } }] }] };
+    const tr = T14.parseTransit(tj)[0];
+    ok('S14-10 대중교통 구간별 path (버스 151점 → 3점), 좌표 없는 구간은 null · 기존 start/end 유지', tr.steps[0].path.length === 2 && tr.steps[1].path.length === 3 && tr.steps[2].path === null && tr.steps[1].start.lat === 36.36 && tr.steps[1].end.lng === 127.35, tr.steps.map((x) => x.path && x.path.length).join('/'));
+    // 서버 함수 경유: drive 응답에 path 포함
+    global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ routes: [{ result_code: 0, summary: { duration: 600, distance: 5000, fare: { taxi: 7000 } }, sections: [{ roads: [{ vertexes: [127.34, 36.36, 127.36, 36.35, 127.38, 36.34] }] }] }] }) });
+    const dv = await C.drive({ olat: '36.36', olng: '127.34', dlat: '36.34', dlng: '127.38' });
+    ok('S14-11 /api/drive 응답에 path 포함 · 시간·요금 그대로', dv.durationSec === 600 && dv.taxiFare === 7000 && Array.isArray(dv.path) && dv.path.length >= 2, JSON.stringify(dv.path));
+    // 크기: 대중교통 15경로 × 3구간 × 상한 60점이어도 응답이 과하게 커지지 않음
+    const many = { status: 'OK', routes: Array.from({ length: 15 }, () => ({ properties: { type: 'BUS', totalTime: 900, totalDistance: 3000, transfers: 0, fare: { value: 1500 } }, steps: [0, 1, 2].map((k) => ({ properties: { type: k === 1 ? 'BUS' : 'WALKING', time: 300, distance: 1000, stops: k === 1 ? [{ name: 'A' }, { name: 'B' }] : [], vehicles: k === 1 ? [{ name: '1', type: '일반' }] : [] }, path: { points: zig } })) })) };
+    const bytes = JSON.stringify(T14.parseTransit(many)).length;
+    ok('S14-12 최악의 경우(15경로·구간마다 60점) 대중교통 응답 크기 70KB 이하', bytes < 70000, `${Math.round(bytes / 1024)}KB`);
+    process.env.MOCK = '1';
+  }
+
   console.log(`\n결과: 통과 ${pass} / 실패 ${fail}`);
   process.exit(fail ? 1 : 0);
 })();
