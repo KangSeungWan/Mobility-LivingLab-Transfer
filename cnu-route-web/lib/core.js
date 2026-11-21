@@ -13,16 +13,19 @@ const isMock = () => env('MOCK') === '1' || !env('DATA_GO_KR_KEY');
 // 공공 원천 데이터(정류소·도착정보·시각표·타슈 전체 목록)만 서버 메모리에 잠깐 둡니다.
 // 카카오 검색·길찾기 결과는 사용자 간 공유가 허용되지 않아 여기에 넣지 않습니다.
 const INFLIGHT = new Map();
-async function cached(key, ttlMs, fn) {
+// keep(v): 결과를 캐시에 둘지 (false면 이번 요청에만 쓰고 저장하지 않음 — 불완전한 결과 등 · update12 감사)
+async function cached(key, ttlMs, fn, keep) {
   const now = Date.now(), hit = CACHE.get(key);
   if (hit && now < hit.exp) return hit.v;
   if (INFLIGHT.has(key)) return INFLIGHT.get(key);           // 같은 요청이 진행 중이면 합쳐서 외부 호출 1번만
   const p = (async () => {
     try {
       const v = await fn();
-      CACHE.set(key, { exp: Date.now() + ttlMs, v });
-      for (const [k, c] of CACHE) if (Date.now() >= c.exp) CACHE.delete(k);   // 만료된 항목은 바로 지움
-      if (CACHE.size > 500) CACHE.delete(CACHE.keys().next().value);
+      if (!keep || keep(v)) {
+        CACHE.set(key, { exp: Date.now() + ttlMs, v });
+        for (const [k, c] of CACHE) if (Date.now() >= c.exp) CACHE.delete(k);   // 만료된 항목은 바로 지움
+        if (CACHE.size > 500) CACHE.delete(CACHE.keys().next().value);
+      }
       return v;
     } finally { INFLIGHT.delete(key); }
   })();
@@ -34,14 +37,18 @@ async function cached(key, ttlMs, fn) {
 // 외부 API를 부르기 직전에 1회씩 예약합니다(재시도·점검 호출 포함). 한도를 넘으면 외부 호출 없이 멈춥니다.
 // 기본값은 공개된 개발계정 트래픽보다 낮게 잡은 임시값입니다. 실제 승인량에 맞춰 환경변수 QUOTA_이름 으로 조정하세요.
 // kakao_transit·walk·bike(카카오맵 경로 조회): 하루 무료 1,000건(초과분 유료) → 기존 원칙(승인량의 1/10)대로 100건.
-const QUOTA_DEFAULT = { tago_stops: 8000, tago_arrival: 8000, dj_arrival: 8000, subway: 800, kakao_drive: 3000, kakao_search: 3000, kakao_transit: 100, kakao_walk: 100, kakao_bike: 100, tashu: 3000, other: 100 };
+// tago_route(TAGO 버스노선정보, update12): 운영계정 승인량을 문서로 확인하지 못해 임시값. 노선 정보는 서버가 1일 캐시하므로 실제 외부 호출은 적음
+// djtc_dist(대전교통공사 역간 소요시간/거리/요금, update12): 포털 안내 개발계정 하루 1,000건 → 기존 원칙(1/10)대로 100. 역 쌍별 서버 1일 캐시
+const QUOTA_DEFAULT = { tago_stops: 8000, tago_arrival: 8000, tago_route: 3000, dj_arrival: 8000, subway: 800, djtc_dist: 100, kakao_drive: 3000, kakao_search: 3000, kakao_transit: 100, kakao_walk: 100, kakao_bike: 100, tashu: 3000, other: 100 };
 const QUOTA_LOCAL = new Map();
 function quotaFor(url) {
   const u = String(url);
   if (u.includes('BusSttnInfoInqireService')) return 'tago_stops';
   if (u.includes('ArvlInfoInqireService')) return 'tago_arrival';
+  if (u.includes('BusRouteInfoInqireService')) return 'tago_route';
   if (u.includes('/6300000/arrive') || (env('DJ_ARRIVAL_URL') && u.startsWith(env('DJ_ARRIVAL_URL')))) return 'dj_arrival';
   if (u.includes('TimeTableSVC') || (env('DJ_SUBWAY_URL') && u.startsWith(env('DJ_SUBWAY_URL')))) return 'subway';
+  if (u.includes('/B554695/TimeDistSVC')) return 'djtc_dist';
   if (u.includes('apis-navi.kakaomobility.com')) return 'kakao_drive';
   if (u.includes('dapi.kakao.com/v2/routing/publictraffic')) return 'kakao_transit';
   if (u.includes('dapi.kakao.com/v2/routing/walk')) return 'kakao_walk';
@@ -172,7 +179,7 @@ async function nearbyStops(q) {
     return tagoItems(text).map((it) => ({
       id: String(it.nodeid), name: String(it.nodenm), lat: Number(it.gpslati), lng: Number(it.gpslong),
       no: it.nodeno != null ? String(it.nodeno) : null, city: it.citycode != null ? String(it.citycode) : null,
-    })).filter((s) => !s.city || s.city === DAEJEON_CITY_CODE);
+    })).filter((s) => (!s.city || s.city === DAEJEON_CITY_CODE) && it0(s.id) && it0(s.name));
   });
   return { mock: false, stops };
 }
@@ -186,11 +193,193 @@ async function arrivals(q) {
     const text = await fetchTago(dataGoUrl('https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList',
       { cityCode: DAEJEON_CITY_CODE, nodeId, numOfRows: 60, pageNo: 1, _type: 'json' }));
     const list = tagoItems(text).map((it) => ({
-      routeNo: String(it.routeno), routeId: String(it.routeid || ''), routeType: it.routetp || '',
-      arrSec: it.arrtime == null || it.arrtime === '' ? NaN : Number(it.arrtime), prevCnt: Number(it.arrprevstationcnt), vehicleType: it.vehicletp || '',
-    })).filter((a) => Number.isFinite(a.arrSec) && a.arrSec >= 0).sort((a, b) => a.arrSec - b.arrSec);
+      routeNo: String(it.routeno), routeId: validRouteId(it.routeid) ? String(it.routeid) : '', routeType: it.routetp || '',
+      arrSec: it.arrtime == null || it.arrtime === '' ? NaN : Number(it.arrtime), prevCnt: cnt(it.arrprevstationcnt), vehicleType: it.vehicletp || '',
+    })).filter((a) => Number.isFinite(a.arrSec) && a.arrSec >= 0 && it0(a.routeNo)).sort((a, b) => a.arrSec - b.arrSec);
     return { mock: false, source: 'tago', nodeId, at: Date.now(), list };
   });
+}
+
+/* ---------- 2-0. 버스 노선·경유 정류장 (TAGO 버스노선정보 · update12) ---------- */
+// 공식 명세(data.go.kr 15098529): 1613000/BusRouteInfoInqireService — 노선번호목록 조회(cityCode·routeNo → routeid·routeno·routetp·startnodenm·endnodenm),
+//   노선별경유정류소목록 조회(cityCode·routeId → nodeid·nodenm·nodeno·nodeord·gpslati·gpslong·updowncd[0 상행·1 하행], routeid·nodeno·updowncd는 선택 항목).
+//   이용허락범위 제한 없음. 운행 방향 자동 검증에 씀. 노선 정보는 자주 바뀌지 않아 서버 메모리 1일 캐시(도착정보 캐시와 분리),
+//   목록이 불완전(받은 건수 ≠ totalCount, 필수 항목 누락)하면 오류로 처리해 캐시하지 않음
+const ROUTE_BASE = 'https://apis.data.go.kr/1613000/BusRouteInfoInqireService';
+const ROUTE_OPS = { list: 'getRouteNoList', stops: 'getRouteAcctoThrghSttnList' };   // 기능별 경로 (2026-11-19 실제 응답으로 확인 — DEV_LOG)
+// 건수·쪽 번호 원본 값 검사 (update12 최종): 0 이상 정수(숫자) 또는 숫자로만 된 문자열만 인정.
+//   null·누락·빈 문자열·공백·음수·소수·boolean·'12abc' 같은 값은 NaN → 불완전 응답 (Number(null) = 0 으로 '정상 0건'이 되지 않게)
+function countOf(v) {
+  if (typeof v === 'number') return Number.isInteger(v) && v >= 0 ? v : NaN;
+  if (typeof v === 'string' && /^\d+$/.test(v)) { const n = Number(v); return Number.isSafeInteger(n) ? n : NaN; }
+  return NaN;
+}
+// 노선 ID 원본 값 검사: 문자열·숫자이고 영문·숫자·_·- 로만 된 값 (누락·null·빈 문자열·공백·객체·배열은 불량)
+//   문자열 'null'·'undefined'(대소문자·앞뒤 공백 무관)도 불량 — 값이 없던 것을 문자열로 바꾼 흔적이라 정상 노선 ID로 보지 않음 (update12 최종)
+const validRouteId = (v) => (typeof v === 'string' || typeof v === 'number') && /^[A-Za-z0-9_-]{1,40}$/.test(String(v)) && !/^(null|undefined)$/i.test(String(v).trim());
+function tagoBody(text) {
+  const items = tagoItems(text);                 // 오류 코드·XML 오류 처리 포함
+  const j = JSON.parse(text.trim()), b = j.response && j.response.body;
+  const total = b ? countOf(b.totalCount) : NaN;
+  const pageNo = b && b.pageNo !== undefined && b.pageNo !== null ? countOf(b.pageNo) : null;   // 쪽 번호가 있는데 숫자가 아니면 NaN → 요청 쪽과 달라 오류
+  return { items, total, pageNo };
+}
+// 페이지를 끝까지 받아 '완전한 목록'일 때만 돌려줌 (update12 감사: 받은 건수가 totalCount와 같다는 것만으로 완전하다고 보지 않음)
+//   · 쪽마다 전체 건수(totalCount)가 있고 첫 쪽과 같아야 함 · 응답에 쪽 번호(pageNo)가 있으면 요청한 쪽과 같아야 함
+//   · 앞서 받은 쪽과 내용이 같은 쪽이 다시 오면 오류 · 마지막 쪽이 아니면 요청한 건수(100)를 꽉 채워야 함
+//   · 합계 건수 = 전체 건수. 하나라도 어긋나면 502 (캐시 안 함)
+async function tagoAll(op, params, label) {
+  const rows = 100, all = [], seen = new Set();
+  let total = NaN;
+  for (let page = 1; page <= 20; page++) {
+    const r = tagoBody(await fetchTago(dataGoUrl(`${ROUTE_BASE}/${op}`, { ...params, numOfRows: rows, pageNo: page, _type: 'json' })));
+    if (!Number.isFinite(r.total) || r.total < 0) throw new ApiError(502, `${label}: 전체 건수(totalCount)가 없어 목록이 완전한지 확인할 수 없어요`);
+    if (page === 1) total = r.total;
+    else if (r.total !== total) throw new ApiError(502, `${label}: 쪽마다 전체 건수가 달라요(${total} → ${r.total}) · 불완전한 목록`);
+    if (r.pageNo != null && r.pageNo !== page) throw new ApiError(502, `${label}: ${page}쪽을 요청했는데 ${r.pageNo}쪽 응답이 왔어요 · 불완전한 목록`);
+    const sig = JSON.stringify(r.items);
+    if (r.items.length && seen.has(sig)) throw new ApiError(502, `${label}: 같은 내용의 쪽이 반복해서 왔어요 · 불완전한 목록`);
+    seen.add(sig);
+    all.push(...r.items);
+    if (all.length >= total || !r.items.length) break;
+    if (r.items.length !== rows) throw new ApiError(502, `${label}: ${page}쪽이 ${r.items.length}건뿐인데 목록이 끝나지 않았어요 · 불완전한 목록`);
+  }
+  if (all.length !== total) throw new ApiError(502, `${label}: 받은 ${all.length}건과 전체 ${total}건이 달라 불완전한 목록이에요`);
+  return all;
+}
+const fnn = (v) => (v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null);
+// 정거장 수: 0 이상 정수만 (빈 값·누락은 null — 0으로 보지 않음. 화면에 'null정거장 전'이 나오지 않게 · update12 감사)
+function cnt(v) { const n = fnn(v); return n != null && Number.isInteger(n) && n >= 0 ? n : null; }
+const it0 = (v) => !!v && v !== 'undefined' && v !== 'null';
+// 경유 정류장 목록 검사 (update12 감사): 필수 항목 · 순번(1 이상 정수, 중복·빈 번호 없음) · 상하행 코드 구간
+//   순환노선은 같은 정류장 ID가 다른 순번으로 다시 나올 수 있어 정상. 같은 순번이 두 번이면(같은 행 반복 등) 비정상
+function checkStops(stops) {
+  const why = [];
+  if (!stops.length) why.push('경유 정류장 없음');
+  if (stops.some((x) => !x.nodeId || !x.name || x.ord == null || !pt([x.lng, x.lat]))) why.push('필수 항목(정류장 ID·이름·순번·좌표) 누락');
+  const ords = stops.map((x) => x.ord).filter((o) => o != null);
+  if (ords.some((o) => !Number.isInteger(o) || o < 1)) why.push('순번이 1 이상 정수가 아님');
+  else if (new Set(ords).size !== ords.length) why.push('같은 순번이 두 번 이상 나옴');
+  else if (ords.length && Math.max(...ords) - Math.min(...ords) + 1 !== ords.length) why.push('순번 중간이 비어 있음');
+  const ud = stops.map((x) => x.ud);
+  if (ud.length && ud.every((u) => u != null)) {
+    let turns = 0;
+    for (let i = 1; i < ud.length; i++) if (ud[i] !== ud[i - 1]) turns++;
+    if (turns > 1) why.push(`상하행 코드가 ${turns}번 바뀜(운행 구간 비정상)`);
+  }
+  return why;
+}
+async function busRoute(q) {
+  const routeNo = String(q.routeNo || '').trim();
+  if (!/^[0-9A-Za-z가-힣-]{1,12}$/.test(routeNo)) throw new ApiError(400, 'routeNo(노선 번호) 값이 올바르지 않습니다');
+  if (isMock()) return { mock: true, routeNo, routes: [] };
+  // 완전한 결과만 서버 1일 캐시 (complete=false면 저장하지 않고, handler도 CDN 저장을 막음 · update12 감사)
+  return cached(`route:${routeNo}`, 24 * 3600e3, async () => {
+    // 노선번호 조회는 비슷한 번호도 함께 줄 수 있어 번호가 정확히 같은 노선만 사용
+    //   번호가 같은데 노선 ID가 불량(누락·null·빈 값 등)인 행이 있으면 조용히 빼지 않고 전체를 불완전으로 처리 (update12 최종)
+    const same = (await tagoAll(ROUTE_OPS.list, { cityCode: DAEJEON_CITY_CODE, routeNo }, '노선번호목록')).filter((it) => it && String(it.routeno) === routeNo);
+    const badIds = same.filter((it) => !validRouteId(it.routeid)).length;
+    const list = same.filter((it) => validRouteId(it.routeid));
+    if (new Set(list.map((it) => String(it.routeid))).size !== list.length) throw new ApiError(502, '노선번호목록: 같은 노선 ID가 두 번 이상 나와 목록을 믿을 수 없어요');
+    const routes = [];
+    for (const it of list.slice(0, 6)) {
+      const raw = await tagoAll(ROUTE_OPS.stops, { cityCode: DAEJEON_CITY_CODE, routeId: it.routeid }, '노선별경유정류소');
+      const stops = raw.map((x) => ({ nodeId: x.nodeid ? String(x.nodeid) : null, name: String(x.nodenm || ''), no: x.nodeno != null && x.nodeno !== '' ? String(x.nodeno) : null,
+        ord: fnn(x.nodeord), lat: fnn(x.gpslati), lng: fnn(x.gpslong), ud: x.updowncd === 0 || x.updowncd === 1 || x.updowncd === '0' || x.updowncd === '1' ? Number(x.updowncd) : null }));
+      stops.sort((a, b) => (a.ord ?? 1e9) - (b.ord ?? 1e9));
+      // 필수 항목 누락·순번 이상·상하행 구간 이상이면 이 노선은 '불완전' — 화면에서 방향 확정에 쓰지 않음
+      const bad = checkStops(stops);
+      routes.push({ routeId: String(it.routeid), routeNo, routeType: String(it.routetp || ''), start: String(it.startnodenm || ''), end: String(it.endnodenm || ''),
+        complete: !bad.length, why: bad.length ? bad.join(' · ') : null, hasUd: stops.some((x) => x.ud != null), stops });
+    }
+    // 전체 완전성: 노선 ID를 모두 받았고(최대 6개) 모든 노선이 완전할 때만 complete=true
+    const more = list.length > 6;
+    const why = [...(badIds ? [`노선 ID가 없거나 잘못된 행 ${badIds}개`] : []), ...(more ? [`노선 ID ${list.length}개 중 6개만 조회`] : []), ...routes.filter((r) => !r.complete).map((r) => `${r.routeId}: ${r.why}`)];
+    return { mock: false, routeNo, at: Date.now(), routes, more, complete: !why.length, why: why.length ? why.join(' / ') : null };
+  }, (v) => v.complete === true);
+}
+
+/* ---------- 2-0b. 대전교통공사 역간 소요시간/거리/요금 (update12 · 공식 명세 data.go.kr 15158794) ---------- */
+// 포털 공개 명세: 기본 주소 https://apis.data.go.kr/B554695/TimeDistSVC · 요청변수 serviceKey · strstnno(조회 시작역, 예 111) · endstnno(조회 끝역, 예 120) · XML.
+//   오퍼레이션 getTimeDist01(운영계정 승인 화면, 2026-11-20). 실제 응답: <response><header><resultCode>00</resultCode>…</header><body><item>
+//   <distfloat>9.1</distfloat>(㎞)<fee>1400</fee>(과거 운임 — 현행 1,550·1,650보다 150원 낮음)<min>19</min><sec>0</sec></item></body>.
+//   item의 하위 항목을 이름 그대로(문자열) 돌려줌 — 화면은 distfloat(거리)만 요금 구간 판정에 쓰고 fee는 금액으로 쓰지 않음
+//   캐시: 역 쌍별 서버 메모리 1일 · 정상 응답(항목 1개 이상)만 저장 · 동시 요청 병합 · 오류·빈 응답은 저장 안 함 · CDN 저장 안 함
+const STNDIST_PREFIX = 'https://apis.data.go.kr/B554695/TimeDistSVC/';
+// 오퍼레이션 주소: 2026-11-20 운영계정 승인 화면에서 확인(getTimeDist01, 운영계정 하루 100,000건, 활용 2026-11-20~2028-11-20). .env DJ_STNDIST_URL이 있으면 그것을 우선
+const STNDIST_URL = () => env('DJ_STNDIST_URL') || STNDIST_PREFIX + 'getTimeDist01';
+const stnNo = (v) => (/^1(0[1-9]|1[0-9]|2[0-2])$/.test(String(v || '').trim()) ? String(v).trim() : null);   // 1호선 역번호 101~122
+function xmlItems(xml) {
+  return xmlBlocks(xml).map((b) => Object.fromEntries([...b.matchAll(/<([A-Za-z][\w]*)>([^<]*)<\/\1>/g)].map((m) => [m[1], m[2].trim()])));
+}
+// 작은 XML 해석기(update12): 태그가 모두 짝이 맞고 닫혀 있을 때만 트리를 돌려줌, 아니면 null. 속성·CDATA·주석·자기 닫힘 태그는 이 API에 없어 거부
+function xmlTree(xml) {
+  const t = String(xml || '').replace(/^\uFEFF?\s*<\?xml[^>]*\?>/, '').trim();
+  if (!t.startsWith('<') || /<!|<\?/.test(t)) return null;
+  const root = { name: '#root', kids: [], text: '' }, stack = [root];
+  const re = /<(\/?)([A-Za-z_][\w.-]*)\s*>|([^<]+)|(<)/g;
+  let m;
+  while ((m = re.exec(t))) {
+    if (m[4]) return null;                                     // 해석할 수 없는 '<'
+    if (m[3] !== undefined) { if (stack.length === 1) { if (m[3].trim()) return null; } else stack[stack.length - 1].text += m[3]; continue; }
+    if (m[1]) { const top = stack.pop(); if (!top || top.name !== m[2] || stack.length === 0) return null; continue; }
+    const el = { name: m[2], kids: [], text: '' }; stack[stack.length - 1].kids.push(el); stack.push(el);
+  }
+  return stack.length === 1 && root.kids.length === 1 ? root.kids[0] : null;
+}
+const kid = (el, name) => (el ? el.kids.filter((k) => k.name === name) : []);
+// 역간 거리 항목 검사 (update12 · 서버·화면 같은 기준): distfloat는 일반 10진수(정수 또는 소수, 부호·지수·16진수·NaN·Infinity·빈 값 불가) · 0 초과 40㎞ 이하(1호선 전체 약 22.6㎞)
+//   min·sec는 0 이상 정수, sec는 0~59. 응답에 요청변수와 같은 이름의 역번호(strstnno·endstnno)가 있으면 요청 역과 같아야 함 — 없으면(실제 응답) 검사하지 않음.
+//   역번호 항목 이름은 공식 응답 명세에 없어 요청변수 이름이 응답에 그대로 올 때만 대조(다른 이름을 표준으로 단정하지 않음)
+const DIST_RE = /^\d+(\.\d+)?$/, INT_RE = /^\d+$/;
+function checkDistItem(it, from, to) {
+  if (!it || typeof it !== 'object') return { why: '항목 없음' };
+  const d = it.distfloat, m = it.min, s = it.sec;
+  if (typeof d !== 'string' || !DIST_RE.test(d)) return { why: `거리(distfloat) 형식 오류: ${JSON.stringify(d)}` };
+  const km = Number(d);
+  if (!(km > 0 && km <= 40)) return { why: `거리(distfloat) 범위 오류: ${d}` };
+  // min·sec: 0 이상 10진 정수 문자열이고 변환값이 안전한 정수(309자리처럼 Infinity가 되는 값 불가) · sec 0~59 · min 60 이하
+  //   (1호선 전 구간: 시각표상 반석 122→대전역 104가 34분, 대전역→판암 101까지 더해도 40분 안쪽 — 여유를 둔 상한)
+  const mi = typeof m === 'string' && INT_RE.test(m) ? Number(m) : NaN, se = typeof s === 'string' && INT_RE.test(s) ? Number(s) : NaN;
+  if (!Number.isSafeInteger(mi) || !Number.isSafeInteger(se) || se > 59 || mi > 60) return { why: `소요시간(min·sec) 오류: ${String(JSON.stringify(m)).slice(0, 20)}·${String(JSON.stringify(s)).slice(0, 20)}` };
+  if (it.strstnno !== undefined && String(it.strstnno).trim() !== String(from)) return { why: `응답 출발역(${it.strstnno})이 요청(${from})과 다름` };
+  if (it.endstnno !== undefined && String(it.endstnno).trim() !== String(to)) return { why: `응답 도착역(${it.endstnno})이 요청(${to})과 다름` };
+  return { km, min: mi, sec: se };
+}
+// 역간 거리 응답 검사: 닫힌 XML · response>header>resultCode = 00 · response>body>item(또는 body>items>item) 정확히 1개 · item 하위 항목은 값만 있는 단일 항목 · checkDistItem 통과
+function parseStnDist(xml, from, to) {
+  const root = xmlTree(xml);
+  if (!root || root.name !== 'response') return { err: 'XML 형식 오류(태그가 닫히지 않았거나 해석할 수 없음)' };
+  const header = kid(root, 'header'), body = kid(root, 'body');
+  if (header.length !== 1 || body.length !== 1) return { err: 'header·body 구조 오류' };
+  const code = kid(header[0], 'resultCode');
+  // resultCode는 하위 요소가 없는 단일 텍스트 '00'만 성공 (예: <resultCode>00<x>03</x></resultCode>는 거부 — 중첩 내용을 합친 텍스트로 판단하지 않음)
+  if (code.length !== 1 || code[0].kids.length || code[0].text.trim() !== '00') return { err: code.length ? `결과 코드 ${code[0].text.trim() || '(빈 값)'}${kid(header[0], 'resultMsg')[0] ? ' · ' + kid(header[0], 'resultMsg')[0].text.trim() : ''}` : '결과 코드(resultCode) 없음' };
+  const wrap = kid(body[0], 'items'), items = [...kid(body[0], 'item'), ...wrap.flatMap((w) => kid(w, 'item'))];
+  if (wrap.length > 1 || items.length !== 1) return { incomplete: `item ${items.length}개(정확히 1개여야 함)` };
+  const it = items[0];
+  if (it.kids.some((k) => k.kids.length) || new Set(it.kids.map((k) => k.name)).size !== it.kids.length) return { incomplete: 'item 하위 항목 구조 오류(중첩·중복)' };
+  const obj = Object.fromEntries(it.kids.map((k) => [k.name, k.text.trim()]));
+  const c = checkDistItem(obj, from, to);
+  return c.why ? { incomplete: c.why, item: obj } : { item: obj, dist: c };
+}
+async function stationDist(q) {
+  const from = stnNo(q.from), to = stnNo(q.to);
+  if (!from || !to || from === to) throw new ApiError(400, 'from·to(1호선 역번호 101~122, 서로 다른 역) 값이 올바르지 않습니다');
+  if (isMock()) return { mock: true, from, to, items: [], complete: false };
+  const base = STNDIST_URL();
+  if (!base.startsWith(STNDIST_PREFIX)) throw new ApiError(501, 'DJ_STNDIST_URL은 대전교통공사 역간 소요시간/거리/요금 주소(B554695/TimeDistSVC/…)여야 해요');
+  return cached(`stdist:${from}-${to}`, 24 * 3600e3, async () => {
+    const u = new URL(base); u.search = '';
+    const xml = await fetchText(dataGoUrl(u.toString(), { strstnno: from, endstnno: to }));
+    if (/<returnAuthMsg>|<errMsg>/.test(xml) && !/<returnAuthMsg>\s*NORMAL/i.test(xml)) throw new ApiError(502, '역간 거리·요금 API 오류: ' + explainXmlError(xml));
+    // 응답 검사(update12): XML 형식·결과 코드 오류는 502, 형식은 맞지만 쓸 수 없는 값(item 0·복수, 거리·시간 이상, 역 불일치)은 complete:false — 둘 다 캐시 안 함
+    const p = parseStnDist(xml, from, to);
+    if (p.err) throw new ApiError(502, '역간 거리·요금 API 응답 오류: ' + p.err);
+    const items = p.item ? [p.item] : [];
+    return { mock: false, from, to, at: Date.now(), source: '대전교통공사 역간 소요시간/거리/요금', items, fields: items.length ? Object.keys(items[0]) : [],
+      dist: p.dist || null, complete: !p.incomplete, why: p.incomplete || null };
+  }, (v) => v.complete === true);
 }
 
 /* ---------- 2-1. 대전시 정류소별 도착정보 (보조 · 정류장 번호 arsId 기준, XML) ---------- */
@@ -215,8 +404,8 @@ async function arrivalsDaejeon(q) {
     const list = xmlBlocks(xml).map((b) => {
       const rs = xmlField(b, 'EXTIME_SEC'), rm = xmlField(b, 'EXTIME_MIN'), sec = rs === '' ? NaN : Number(rs), min = rm === '' ? NaN : Number(rm);   // 빈 값은 0분으로 보지 않음
       return {
-        routeNo: xmlField(b, 'ROUTE_NO'), routeId: xmlField(b, 'ROUTE_CD'), destination: xmlField(b, 'DESTINATION'),
-        arrSec: Number.isFinite(sec) && sec > 0 ? sec : min * 60, prevCnt: Number(xmlField(b, 'STATUS_POS')),
+        routeNo: xmlField(b, 'ROUTE_NO'), routeId: validRouteId(xmlField(b, 'ROUTE_CD')) ? xmlField(b, 'ROUTE_CD') : '', destination: xmlField(b, 'DESTINATION'),
+        arrSec: Number.isFinite(sec) && sec > 0 ? sec : min * 60, prevCnt: cnt(xmlField(b, 'STATUS_POS')),
         message: xmlField(b, 'MSG_TP'),
       };
     }).filter((a) => a.routeNo && Number.isFinite(a.arrSec) && a.arrSec >= 0).sort((a, b) => a.arrSec - b.arrSec);
@@ -316,6 +505,24 @@ async function search(q) {
   u.searchParams.set('radius', '20000'); u.searchParams.set('size', '10');
   const j = JSON.parse(await fetchText(u, { Authorization: `KakaoAK ${env('KAKAO_REST_KEY')}` }));
   return { places: (j.documents || []).map((d) => ({ name: d.place_name, address: d.road_address_name || d.address_name, lat: Number(d.y), lng: Number(d.x) })) };
+}
+
+/* ---------- 5-0. 출발지 근처 지하철역 (카카오 로컬 '카테고리로 장소 검색' SW8 · update12) ---------- */
+// 공식 명세(developers.kakao.com/docs/ko/local/dev-guide): GET dapi.kakao.com/v2/local/search/category.json,
+//   category_group_code=SW8(지하철역), x=경도·y=위도, radius 0~20000m, size 1~15, sort=distance(x·y 필요), documents[].distance는 미터(문자열)
+// 복합경로의 환승역 후보를 찾는 데 씀. 카카오 결과는 저장·재사용하지 않음(no-store, 서버 캐시 없음). 하루 한도는 kakao_search와 같이 셈
+async function stations(q) {
+  const lat = num(q.lat, 'lat'), lng = num(q.lng, 'lng');
+  inDaejeon(lat, lng);
+  const radius = Math.round(Math.min(Math.max(Number(q.r) || 4000, 500), 5000));
+  if (!env('KAKAO_REST_KEY') || env('MOCK') === '1') throw new ApiError(501, '카카오 REST 키가 없거나 예시 데이터 모드라 지하철역을 찾을 수 없어요');
+  const u = new URL('https://dapi.kakao.com/v2/local/search/category.json');
+  u.searchParams.set('category_group_code', 'SW8'); u.searchParams.set('x', String(lng)); u.searchParams.set('y', String(lat));
+  u.searchParams.set('radius', String(radius)); u.searchParams.set('sort', 'distance'); u.searchParams.set('size', '15');
+  let j;
+  try { j = JSON.parse(await fetchText(u, { Authorization: `KakaoAK ${env('KAKAO_REST_KEY')}` })); } catch (e) { if (e instanceof ApiError) throw e; throw new ApiError(502, '카카오 장소 검색 응답을 읽을 수 없어요'); }
+  return { radius, stations: (j.documents || []).map((d) => ({ name: String((d && d.place_name) || ''), category: String((d && d.category_name) || ''), lat: fin(d && d.y), lng: fin(d && d.x), d: nn(d && d.distance) }))
+    .filter((x) => x.name && pt([x.lng, x.lat])) };
 }
 
 /* ---------- 5-1. 카카오맵 경로 조회: 대중교통 · 도보 · 자전거 (REST 키 · update10) ---------- */
@@ -499,7 +706,7 @@ async function health(q) {
   if (process.env.VERCEL && (!env('HEALTH_TOKEN') || String(q.token || '') !== env('HEALTH_TOKEN')))
     throw new ApiError(404, '배포 환경에서는 API 점검이 꺼져 있어요 (HEALTH_TOKEN 필요)');
   const keys = { DATA_GO_KR_KEY: !!env('DATA_GO_KR_KEY'), KAKAO_JS_KEY: !!env('KAKAO_JS_KEY'), KAKAO_REST_KEY: !!env('KAKAO_REST_KEY'), TASHU_KEY: !!env('TASHU_KEY'),
-    DJ_SUBWAY_TEST_URL: !!env('DJ_SUBWAY_TEST_URL'), MOCK: env('MOCK') === '1' };
+    DJ_SUBWAY_TEST_URL: !!env('DJ_SUBWAY_TEST_URL'), DJ_STNDIST_URL: !!env('DJ_STNDIST_URL'), MOCK: env('MOCK') === '1' };
   const checks = [];
   if (keys.MOCK) return { keys, checks, note: '예시 데이터 모드(MOCK=1)라 외부 API 점검을 하지 않았어요. .env에서 MOCK=0으로 바꾸고 다시 실행하세요.' };
   if (!keys.DATA_GO_KR_KEY) return { keys, checks, note: '.env에 DATA_GO_KR_KEY가 없어 공공데이터 점검을 건너뛰었어요.' };
@@ -535,6 +742,24 @@ async function health(q) {
       const n = xmlBlocks(r.text).length;
       return { ok: true, message: n ? `정상 · 도착 예정 ${n}건` : '응답은 왔지만 도착 항목을 못 찾았어요 (정류장 번호 또는 항목 이름 확인 필요 — 아래 원본을 보내 주세요)' };
     }));
+
+  // 3-0) TAGO 버스노선정보 (update12): 108번 노선 목록 → 첫 노선의 경유 정류장 (원본 형식·건수·updowncd 확인)
+  {
+    const lr = await check('TAGO 버스노선정보 — 노선번호목록 (108번)', dataGoUrl(`${ROUTE_BASE}/${ROUTE_OPS.list}`, { cityCode: DAEJEON_CITY_CODE, routeNo: '108', numOfRows: 20, pageNo: 1, _type: 'json' }), {}, (r) => {
+      if (r.http !== 200) return { ok: false, message: `HTTP ${r.http} — 버스노선정보 활용신청·주소를 확인하세요` };
+      const b = tagoBody(r.text);
+      return { ok: true, message: `정상 · 전체 ${b.total}건 · ` + b.items.map((x) => `${x.routeno}(${x.routeid}, ${x.startnodenm}↔${x.endnodenm})`).join(', ') };
+    });
+    checks.push(lr);
+    try {
+      const first = tagoBody(lr.full).items.find((x) => String(x.routeno) === '108');
+      if (first) checks.push(await check(`TAGO 버스노선정보 — 노선별경유정류소 (${first.routeid})`, dataGoUrl(`${ROUTE_BASE}/${ROUTE_OPS.stops}`, { cityCode: DAEJEON_CITY_CODE, routeId: first.routeid, numOfRows: 100, pageNo: 1, _type: 'json' }), {}, (r) => {
+        if (r.http !== 200) return { ok: false, message: `HTTP ${r.http}` };
+        const b = tagoBody(r.text), ud = b.items.filter((x) => x.updowncd !== undefined && x.updowncd !== '').length;
+        return { ok: true, message: `정상 · 전체 ${b.total}건 · 이번 쪽 ${b.items.length}건 · updowncd 있는 행 ${ud} · 예: ` + b.items.slice(0, 3).map((x) => `${x.nodeord}.${x.nodenm}(${x.nodeid}, 번호 ${x.nodeno}, 상하행 ${x.updowncd})`).join(' / ') };
+      }));
+    } catch { /* 위에서 실패로 판정됨 */ }
+  }
 
   // 3-1) 108번 타는 정류장 찾기 — 근처 대전 정류장마다 도착정보를 조회해 노선·행선지를 모읍니다
   try {
@@ -583,6 +808,16 @@ async function health(q) {
     }));
   }
 
+  // 4-0) 근처 지하철역 (update12 · 카카오 카테고리 SW8 1회) — 복합경로 환승역 후보의 원본 이름·좌표·거리 확인용
+  if (keys.KAKAO_REST_KEY) {
+    const u = `https://dapi.kakao.com/v2/local/search/category.json?category_group_code=SW8&x=${lng}&y=${lat}&radius=4000&sort=distance&size=15`;
+    checks.push(await check('카카오 근처 지하철역 (카테고리 SW8, 반경 4km)', u, { Authorization: `KakaoAK ${env('KAKAO_REST_KEY')}` }, (r) => {
+      if (r.http !== 200) return { ok: false, message: `HTTP ${r.http} — REST 키 또는 앱의 카카오맵 사용 설정을 확인하세요` };
+      const d = JSON.parse(r.text).documents || [];
+      const mapped = d.map((x) => { const tok = String(x.place_name || '').split(/\s+/).map((t) => t.replace(/\(.*?\)/g, '')).find((t) => /역$/.test(t)); const no = tok ? STATION_NO[tok.replace(/역$/, '')] : null; return `${x.place_name}(${x.distance}m${no ? ' → ' + no : ' → 역번호 없음'})`; });
+      return { ok: true, message: `정상 · ${d.length}곳 · ` + mapped.join(', ') };
+    }));
+  }
   // 4-1) 카카오 장소 검색
   if (keys.KAKAO_REST_KEY) {
     const u = 'https://dapi.kakao.com/v2/local/search/keyword.json?query=' + encodeURIComponent('충남대학교 공과대학3호관') + '&size=3';
@@ -679,6 +914,16 @@ async function health(q) {
     u.searchParams.set('serviceKey', env('DATA_GO_KR_KEY'));
     checks.push(await check('대전교통공사 열차시각표 (테스트 주소)', u.toString(), {}, (r) => ({ ok: r.http === 200, message: r.http === 200 ? '응답 받음 · 아래 원본을 보내 주시면 시각표 계산에 연결할게요' : `HTTP ${r.http}` })));
   }
+  // 대전교통공사 역간 소요시간/거리/요금 (update12): 요청 주소(DJ_STNDIST_URL)가 있을 때만 — 월평(114)→대전역(104) 원본 항목 이름·값 확인
+  {
+    const u = new URL(STNDIST_URL()); u.search = '';
+    checks.push(await check('대전교통공사 역간 소요시간/거리/요금 (월평 114 → 대전역 104)', dataGoUrl(u.toString(), { strstnno: 114, endstnno: 104 }), {}, (r) => {
+      if (r.http !== 200 || /<errMsg>/.test(r.text)) return { ok: false, message: `HTTP ${r.http} · ${/<errMsg>/.test(r.text) ? explainXmlError(r.text) : '응답 오류'} — 요청 주소·활용신청 확인` };
+      const it = xmlItems(r.text), pv = parseStnDist(r.text, '114', '104');
+      if (pv.err || pv.incomplete) return { ok: false, message: `응답 검사 실패: ${pv.err || pv.incomplete} (아래 원본 확인)` };
+      return { ok: it.length > 0, message: it.length ? `응답 항목 ${it.length}건 · 항목 이름: ${Object.keys(it[0]).join(', ')} · 첫 항목: ${JSON.stringify(it[0]).slice(0, 300)} — 이 원본을 보내 주시면 거리·요금 항목을 확인해 요금 계산에 연결할게요` : '응답은 왔지만 item 항목이 없어요 (아래 원본 확인)' };
+    }));
+  }
   // 하루 호출량 제한 상태 (공유 저장소가 있으면 전체 인스턴스 합계, 없으면 이 인스턴스 합계)
   {
     const names = Object.keys(QUOTA_DEFAULT), day = kstDay(), store = quotaStore();
@@ -722,9 +967,10 @@ function handler(fn, { cacheSec = 0, perMin = 120 } = {}) {
     }
     res.statusCode = status;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.setHeader('Cache-Control', status === 200 && cacheSec ? `public, max-age=0, s-maxage=${cacheSec}, stale-while-revalidate=${cacheSec}` : 'no-store');
+    // 불완전한 결과(complete=false)는 성공 응답이어도 CDN에 저장하지 않음 (update12 감사)
+    res.setHeader('Cache-Control', status === 200 && cacheSec && !(body && body.complete === false) ? `public, max-age=0, s-maxage=${cacheSec}, stale-while-revalidate=${cacheSec}` : 'no-store');
     res.end(JSON.stringify(body));
   };
 }
 
-module.exports = { nearbyStops, arrivals, arrivalsDaejeon, subway, drive, config, search, transit, walk, bike, tashu, health, handler, ApiError, _test: { parseTransit, parseLeg, quotaFor } };
+module.exports = { nearbyStops, arrivals, arrivalsDaejeon, busRoute, stationDist, subway, drive, config, search, stations, transit, walk, bike, tashu, health, handler, ApiError, _test: { parseTransit, parseLeg, quotaFor, parseStnDist, xmlTree, checkDistItem } };

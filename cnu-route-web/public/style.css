@@ -143,3 +143,16 @@ details summary::-webkit-details-marker{display:none}
 /* 출발지 선택 (update10) */
 .presets{display:flex;flex-wrap:wrap;gap:6px;margin:-2px 0 2px}
 .presets .pm small{font-size:11px;font-weight:600;opacity:.7}
+/* 경로 구조 재설계 (update12): 추가 비용 허용 범위 · 복합경로/유형 표시 */
+.allow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:13px;font-weight:700;color:var(--muted)}
+.allow .pm{box-shadow:none;border:1px solid var(--line);padding:5px 10px}
+.allow .pm.on{border-color:var(--ink)}
+.tag.mix{background:var(--sub);color:#fff}
+.tag.kind{background:var(--surface);color:var(--muted)}
+.allow-in{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:10px;padding:2px 2px 2px 8px;background:var(--bg)}
+.allow-in.on{border-color:var(--ink)}
+.allow-in input{width:6.5em;border:0;background:transparent;font:inherit;font-weight:700;color:var(--ink);padding:4px 0;outline:none}
+.allow-in input:focus-visible{outline:2px solid var(--sub);outline-offset:2px;border-radius:4px}
+.allow-in .pm{padding:4px 9px}
+.allow-err{margin:-2px 0 0;font-size:12px}
+@media (max-width:600px){.allow-in input{font-size:16px}}   /* 휴대폰: 16px 미만이면 입력할 때 화면이 확대됨 */

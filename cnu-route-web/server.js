@@ -22,9 +22,12 @@ const routes = {
   '/api/search': require('./api/search'),
   '/api/tashu': require('./api/tashu'),
   '/api/subway': require('./api/subway'),
+  '/api/stdist': require('./api/stdist'),
   '/api/transit': require('./api/transit'),
   '/api/walk': require('./api/walk'),
   '/api/bike': require('./api/bike'),
+  '/api/stations': require('./api/stations'),
+  '/api/busroute': require('./api/busroute'),
 };
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
 const PUBLIC = path.join(__dirname, 'public');
