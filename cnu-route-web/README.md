@@ -77,7 +77,8 @@ npm start        # → http://localhost:3000
 
 ## 폴더 구조
 ```
-api/          서버 함수 (stops, arrivals, arrivals-dj, busroute, subway, stdist, drive, search, stations, transit, walk, bike, tashu, config, health)
+api/[name].js Vercel 서버 함수 1개 — /api/<이름>을 lib/routes.js 표로 나눠 줌 (Hobby 배포당 함수 12개 제한 대응)
+lib/routes.js API 경로 표 (stops, arrivals, arrivals-dj, busroute, subway, stdist, drive, search, stations, transit, walk, bike, tashu, config, health) · 로컬 server.js와 공용
 lib/core.js   공공데이터·카카오 호출, 오류 해석, 예시 데이터
 public/       웹페이지 (index.html, app.js, style.css, scenario.js, health.html)
 server.js     로컬 실행용 서버

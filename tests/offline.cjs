@@ -164,7 +164,7 @@ function world(o = {}) {
   await core.arrivals({ nodeId: 'DJB8005589' }).catch(() => {});
   ok('H01-13 MOCK=1: 검색·점검·도착정보 모두 외부 호출 0회', Object.keys(ext).length === 0 && !!hm.note, JSON.stringify(ext));
   process.env.MOCK = '0'; core = fresh();
-  const stopsHandler = require(path.join(ROOT, 'api/stops.js')), tashuHandler = require(path.join(ROOT, 'api/tashu.js'));
+  const R13 = require(path.join(ROOT, 'lib/routes.js')), stopsHandler = R13.stops, tashuHandler = R13.tashu;
   const hdr = (hd, q) => new Promise((r) => { const res = { headers: {}, setHeader(k, v) { this.headers[k] = v; }, end() { r(this.headers['Cache-Control']); } }; hd({ query: q, headers: { 'x-forwarded-for': '9.9.9.9' } }, res); });
   global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ response: { header: { resultCode: '00' }, body: { items: '' } }, results: [] }) });
   const cs = await hdr(stopsHandler, { lat: '36.3653', lng: '127.3465' }), ctz = await hdr(tashuHandler, { lat: '36.3653', lng: '127.3465' });
@@ -1403,6 +1403,38 @@ function world(o = {}) {
       delete process.env.DJ_STNDIST_URL;
     }
     delete process.env.QUOTA_KAKAO_TRANSIT;
+  }
+
+  /* ===== update13: Vercel Hobby 서버 함수 12개 제한 → api/ 함수 1개로 통합 (U13) ===== */
+  {
+    const fs = require('fs');
+    const fnFiles = fs.readdirSync(path.join(ROOT, 'api')).filter((f) => /\.(c|m)?js$/.test(f) && !f.startsWith('_'));
+    ok('U13-01 api/ 서버 함수 파일 수 ≤ 12 (Hobby 제한) — 지금 1개', fnFiles.length <= 12 && fnFiles.length === 1, fnFiles.join(','));
+    for (const k of Object.keys(require.cache)) if (k.includes('cnu-route-web')) delete require.cache[k];
+    process.env.MOCK = '1';
+    const routes = require(path.join(ROOT, 'lib/routes.js')), disp = require(path.join(ROOT, 'api/[name].js'));
+    const used = new Set();
+    for (const f of ['public/app.js', 'public/health.html']) for (const m of fs.readFileSync(path.join(ROOT, f), 'utf8').matchAll(/['"`]\/api\/([a-z-]+)/g)) used.add(m[1]);
+    const missing = [...used].filter((n) => !Object.prototype.hasOwnProperty.call(routes, n));
+    ok('U13-02 화면·점검 페이지가 부르는 /api/* 이름이 모두 경로 표에 있음', used.size >= 10 && missing.length === 0, `사용 ${used.size}개 · 없음 ${missing.join(',')}`);
+    ok('U13-03 경로 표 15개 (기존 api 파일과 같은 이름)', ['stops', 'arrivals', 'arrivals-dj', 'busroute', 'subway', 'stdist', 'drive', 'search', 'stations', 'transit', 'walk', 'bike', 'tashu', 'config', 'health'].every((n) => typeof routes[n] === 'function') && Object.keys(routes).length === 15);
+    const call = (url, query) => new Promise((r) => { const req = { url, query, headers: { 'x-forwarded-for': '8.8.8.8' } }; const res = { headers: {}, setHeader(k, v) { this.headers[k] = v; }, end(b) { r({ status: this.statusCode || 200, body: JSON.parse(b), req }); } }; disp(req, res); });
+    let c = await call('/api/config?x=1', { name: 'config', x: '1' });
+    ok('U13-04 /api/config → config 처리, Vercel이 넣은 name 파라미터는 지움', c.status === 200 && c.body.mock === true && !('name' in c.req.query) && c.req.query.x === '1', JSON.stringify(c.req.query));
+    c = await call('/api/config/', {});
+    ok('U13-05 끝에 / 가 붙어도 같은 API', c.status === 200 && c.body.mock === true);
+    c = await call('/api/__proto__', { name: '__proto__' });
+    const c2 = await call('/api/nope', { name: 'nope' });
+    ok('U13-06 없는 이름·__proto__ → 404 (객체 기본 속성으로 새지 않음)', c.status === 404 && c2.status === 404);
+    // 로컬 server.js도 같은 표 사용
+    const { spawn } = require('child_process'), http = require('http');
+    const port = 30000 + Math.floor(Math.random() * 20000);
+    const sv = spawn(process.execPath, [path.join(ROOT, 'server.js')], { env: { ...process.env, PORT: String(port), MOCK: '1', DATA_GO_KR_KEY: '' }, cwd: '/' });
+    await new Promise((r) => { sv.stdout.on('data', r); setTimeout(r, 3000); });
+    const get = (u) => new Promise((r) => http.get(`http://127.0.0.1:${port}${u}`, (res) => { let b = ''; res.on('data', (d) => (b += d)); res.on('end', () => r({ status: res.statusCode, b })); }).on('error', () => r({ status: 0 })));
+    const g1 = await get('/api/config'), g2 = await get('/api/nope'), g3 = await get('/');
+    sv.kill();
+    ok('U13-07 로컬 server.js: /api/config 200 · 없는 API 404 · 화면 200', g1.status === 200 && JSON.parse(g1.b).mock === true && g2.status === 404 && g3.status === 200, `${g1.status}/${g2.status}/${g3.status}`);
   }
 
   console.log(`\n결과: 통과 ${pass} / 실패 ${fail}`);

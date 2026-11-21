@@ -12,29 +12,14 @@ if (fs.existsSync(envFile)) {
   }
 }
 
-const routes = {
-  '/api/stops': require('./api/stops'),
-  '/api/arrivals': require('./api/arrivals'),
-  '/api/arrivals-dj': require('./api/arrivals-dj'),
-  '/api/drive': require('./api/drive'),
-  '/api/config': require('./api/config'),
-  '/api/health': require('./api/health'),
-  '/api/search': require('./api/search'),
-  '/api/tashu': require('./api/tashu'),
-  '/api/subway': require('./api/subway'),
-  '/api/stdist': require('./api/stdist'),
-  '/api/transit': require('./api/transit'),
-  '/api/walk': require('./api/walk'),
-  '/api/bike': require('./api/bike'),
-  '/api/stations': require('./api/stations'),
-  '/api/busroute': require('./api/busroute'),
-};
+const routes = require('./lib/routes');   // /api/<이름> 경로 표 (Vercel api/[name].js와 공용)
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
 const PUBLIC = path.join(__dirname, 'public');
 
 http.createServer((req, res) => {
   const { pathname } = new URL(req.url, 'http://local');
-  if (routes[pathname]) return routes[pathname](req, res);
+  const m = pathname.match(/^\/api\/([a-z-]+)\/?$/);
+  if (m && Object.prototype.hasOwnProperty.call(routes, m[1])) return routes[m[1]](req, res);
   const file = path.normalize(path.join(PUBLIC, pathname === '/' ? 'index.html' : decodeURIComponent(pathname)));
   if (!file.startsWith(PUBLIC)) { res.statusCode = 403; return res.end(); }
   fs.readFile(file, (err, data) => {

@@ -44,7 +44,7 @@
 
 ```mermaid
 flowchart LR
-  U["브라우저<br/>public/ (index.html · app.js)"] -->|"/api/*"| S["서버 함수<br/>api/ + lib/core.js<br/>(키 보관 · 캐시 · 호출 제한)"]
+  U["브라우저<br/>public/ (index.html · app.js)"] -->|"/api/*"| S["서버 함수 1개<br/>api/[name].js → lib/routes.js · lib/core.js<br/>(키 보관 · 캐시 · 호출 제한)"]
   S --> T["국토교통부 TAGO<br/>버스 도착 · 정류소"]
   S --> D["대전광역시<br/>정류소별 도착정보"]
   S --> M["대전교통공사<br/>열차시각표"]
@@ -64,7 +64,8 @@ API 키는 서버에만 있고 브라우저로 전달되지 않습니다. 외부
 
 ```
 cnu-route-web/
-├─ api/          서버 함수 (stops · arrivals · arrivals-dj · busroute · subway · stdist · drive · search · stations · transit · walk · bike · tashu · config · health)
+├─ api/[name].js 서버 함수 1개 (Vercel Hobby 함수 12개 제한 대응) — lib/routes.js 경로 표로 나눔
+│                 (stops · arrivals · arrivals-dj · busroute · subway · stdist · drive · search · stations · transit · walk · bike · tashu · config · health)
 ├─ lib/core.js   외부 API 호출 · 응답 정리 · 오류 해석 · 캐시 · 호출 제한
 ├─ public/       화면 (index.html · app.js · style.css · health.html)
 │  └─ scenario.js  계산 기준값 (출발지 · 확인된 정류장 방향 · 요금표 · 가정값 등) ← 실측하면 여기만 수정
