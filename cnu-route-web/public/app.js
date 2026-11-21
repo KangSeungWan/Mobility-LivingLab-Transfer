@@ -233,6 +233,16 @@ function validRoutes(routes) {
     && r.steps.every((s) => s.type === 'WALKING' || s.stops.length >= 2));
 }
 const validDrive = (v) => !!v && fnum(v.durationSec) > 0 && nonNeg(v.distanceM);
+// 지도 표시용 경로 좌표 (update14): 서버가 준 [[위도,경도], …](또는 이미 정리한 {lat,lng} 목록)에서 정상 좌표만 {lat,lng}로. 2점 미만이면 null (그리기만 생략)
+function cleanPath(path) {
+  if (!Array.isArray(path)) return null;
+  const a = [];
+  for (const q of path) {
+    const p = Array.isArray(q) && q.length >= 2 ? { lat: fnum(q[0]), lng: fnum(q[1]) } : q && typeof q === 'object' && !Array.isArray(q) ? { lat: fnum(q.lat), lng: fnum(q.lng) } : null;
+    if (p && validPt(p)) a.push(p);
+  }
+  return a.length >= 2 ? a : null;
+}
 // 시각표 정리: 구조가 틀리면 버리고, 시각 목록 안의 비정상 값(null·음수)만 걸러 냄 (실제 응답에 섞여 온 적 있음 → 표 전체를 버리지 않음)
 function cleanTimetable(r) {
   if (!r || r.mock || !r.days || typeof r.days !== 'object') return null;
@@ -349,7 +359,7 @@ async function loadDrives(force) {
     try {
       const r = await api('/api/drive', legQuery(st.origin, d));
       if (!validDrive(r)) throw new Error('택시 길찾기 응답이 올바르지 않아요');
-      v = { ...r, taxiFare: nonNeg(r.taxiFare) && fnum(r.taxiFare) > 0 ? Number(r.taxiFare) : null, t: Date.now() };
+      v = { ...r, taxiFare: nonNeg(r.taxiFare) && fnum(r.taxiFare) > 0 ? Number(r.taxiFare) : null, path: cleanPath(r.path), t: Date.now() };
     } catch { v = null; }
     if (k === 'dest') out.dest = v; else out.hub[k] = v;
   }));
@@ -668,7 +678,7 @@ async function loadTransit() {
   for (const p of plans) {
     if (!p.walk0Pt) continue;
     const k = c4(p.walk0Pt.lat) + ',' + c4(p.walk0Pt.lng);
-    if (!walks.has(k) && walks.size < (RS.walk0Max || 3)) walks.set(k, api('/api/walk', legQuery(st.origin, p.walk0Pt)).then((v) => (validLeg(v) ? { sec: Number(v.sec), m: Number(v.m) } : null)).catch(() => null));
+    if (!walks.has(k) && walks.size < (RS.walk0Max || 3)) walks.set(k, api('/api/walk', legQuery(st.origin, p.walk0Pt)).then((v) => (validLeg(v) ? { sec: Number(v.sec), m: Number(v.m), path: cleanPath(v.path) } : null)).catch(() => null));
   }
   await Promise.all(plans.map(async (p) => { if (p.walk0Pt) { const k = c4(p.walk0Pt.lat) + ',' + c4(p.walk0Pt.lng); if (walks.has(k)) p.walk0 = await walks.get(k); } }));
   if (!ok()) return;
@@ -741,7 +751,7 @@ async function loadLegs(force) {
     try {
       const v = await api('/api/' + kind, q);
       if (!validLeg(v)) throw new Error('길찾기 응답이 올바르지 않아요');
-      next[name] = { key, v: { sec: Number(v.sec), m: Number(v.m) }, t: Date.now() };
+      next[name] = { key, v: { sec: Number(v.sec), m: Number(v.m), path: cleanPath(v.path) }, t: Date.now() };   // path: 지도 표시용 (update14)
     } catch (e) { next[name] = { key, err: e.message, t: Date.now() }; }
   }));
   if (!ok()) return;
@@ -1121,6 +1131,125 @@ function computeRoutes(allow = st.allow) {
 //   · 예산 = 비교 기준 요금 + 사용자가 고른 추가 비용(0 · 3,000 · 7,000 · 상관없음, 기본 0)
 //   · 화면의 경로 중 이용 가능이 확인되고 요금이 확인된 경로(전 구간 타슈의 '이상' 도착 제외) 가운데 예산 안에서 가장 빨리 도착하는 경로
 //   · 비교 기준과 같은 분(반올림)에 도착하면 비교 기준 (시간 절감 없음)
+/* ---------------- 지도 표시용 경로 모양 (update14 2단계 · 그리기는 3단계) ---------------- */
+// 경로 카드 하나(r)를 지도에 그릴 수단별 선과 지점 표시로 바꿈. 시간·요금 계산과 무관하고, 외부 호출 없이 이미 받은 결과만 씀
+//   (카카오 결과는 재사용 캐시 없음 정책 그대로 — 지금 화면에 있는 결과를 그리기만 함)
+//   parts: [{ mode: 'walk'|'bus'|'subway'|'bike'|'taxi', pts: [{lat,lng}…], approx }]  approx=true: 좌표가 없어 두 지점을 직선으로 이은 구간(점선 표시용)
+//   marks: [{ pt, kind: 'origin'|'dest'|'board'|'alight'|'dock', label }]
+const SHAPE_NEAR_M = 30;                       // 이보다 가까우면 같은 지점으로 보고 잇는 선을 생략
+const ptOf = (p) => ({ lat: Number(p.lat), lng: Number(p.lng) });
+function nearestOnPath(p, pts) {              // 경로 위에서 p와 가장 가까운 점 (구간 투영, 평면 근사)
+  const kx = Math.cos(p.lat * Math.PI / 180) * 111320, ky = 110540;
+  let best = null;
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const ax = (pts[i].lng - p.lng) * kx, ay = (pts[i].lat - p.lat) * ky, bx = (pts[i + 1].lng - p.lng) * kx, by = (pts[i + 1].lat - p.lat) * ky;
+    const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy, t = L2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / L2)) : 0;
+    const x = ax + t * dx, y = ay + t * dy, d = Math.hypot(x, y);
+    if (!best || d < best.d) best = { d, seg: i, pt: { lat: p.lat + y / ky, lng: p.lng + x / kx } };
+  }
+  return best;
+}
+// 환승역(hb) → 하차역 지하철 선: 같은 하차역으로 가는 카카오 경로의 지하철 구간 좌표 중 환승역에 가장 가까운 지점부터 잘라 씀
+//   (1호선은 한 줄이라 더 먼 역에서 출발한 경로가 이 역을 지남). 경로 밖 역이면 가장 가까운 지점까지 직선(approx)으로 이음
+function subwayShape(hb) {
+  const from = ptOf(hb);
+  let best = null;
+  for (const p of st.plans) {
+    if (!p.subStep || p.to !== hb.alight.stNum) continue;
+    const pts = cleanPath(p.subStep.path); if (!pts) continue;
+    const n = nearestOnPath(from, pts);
+    if (n && (!best || n.d < best.n.d)) best = { n, pts };
+  }
+  if (!best) {
+    const ap = (st.plans.find((p) => p.to === hb.alight.stNum && p.alight && validPt(p.alight.pt)) || {}).alight;
+    const end = ap ? ap.pt : hb.alight.stNum === DEST_ST ? SC.dest : null;
+    return validPt(end) ? [{ mode: 'subway', pts: [from, ptOf(end)], approx: true }] : [];
+  }
+  const out = [], { n, pts } = best;
+  if (n.d > SHAPE_NEAR_M * 5) out.push({ mode: 'subway', pts: [from, n.pt], approx: true });
+  out.push({ mode: 'subway', pts: [n.d > SHAPE_NEAR_M * 5 ? n.pt : from, n.pt, ...pts.slice(n.seg + 1)].filter((q, i, a) => i === 0 || q.lat !== a[i - 1].lat || q.lng !== a[i - 1].lng), approx: false });
+  return out;
+}
+function routeShape(r) {
+  if (!r || !validPt(st.origin) || !validPt(st.dest)) return null;
+  const parts = [], marks = [];
+  const last = () => { const q = parts[parts.length - 1]; return q ? q.pts[q.pts.length - 1] : ptOf(st.origin); };
+  const line = (mode, path, a, b) => {                 // 카카오 좌표가 있으면 그것, 없으면 a→b 직선(approx)
+    const pts = cleanPath(path);
+    if (pts) { parts.push({ mode, pts, approx: false }); return; }
+    if (validPt(a) && validPt(b) && dist(a, b) > SHAPE_NEAR_M) parts.push({ mode, pts: [ptOf(a), ptOf(b)], approx: true });
+  };
+  const link = (mode, b) => { if (validPt(b) && dist(last(), b) > SHAPE_NEAR_M) parts.push({ mode, pts: [last(), ptOf(b)], approx: true }); };   // 앞 구간 끝에서 b까지 이어 줌
+  const mark = (p, kind, label) => { if (validPt(p)) marks.push({ pt: ptOf(p), kind, label }); };
+  // 하차역 이후 목적지까지: 같은 하차역에서 내려 걷기만 하는 카카오 경로의 도보 좌표 → 그래도 멀면 직선
+  const tail = () => {
+    const p = st.plans.find((x) => x.to === DEST_ST && x.subStep && x.route.steps.slice(x.route.steps.indexOf(x.subStep) + 1).every((s) => s.type === 'WALKING'));
+    if (p) for (const s of p.route.steps.slice(p.route.steps.indexOf(p.subStep) + 1)) { link('walk', s.start); line('walk', s.path, s.start, s.end); }
+    link('walk', st.dest);
+  };
+  const subway = (hb) => {
+    link('walk', hb);
+    mark(hb, 'board', `${hb.name} 승차`);
+    for (const q of subwayShape(hb)) parts.push(q);
+    mark(last(), 'alight', `${hb.alight.name} 하차`);
+  };
+  const tStart = curTStart(), LG = st.legs || {}, sameT = !!tStart && LG.tStartId === tId(tStart);
+  const legPath = (name) => { const x = LG[name]; return x && x.v && (/^walkHub:/.test(name) || sameT) ? x.v.path : null; };
+  const busLbl = (s, p) => { const ns = (p && p.namesOf ? p.namesOf(s) : busNames(s)); return `${ns.length > 3 ? ns.slice(0, 3).join('·') + ' 외' : ns.join('·') || '버스'}번 승차`; };
+
+  if (r.kind === 'transit' && r.plan) {
+    const p = r.plan, steps = p.route.steps;
+    if (p.walk0Pt) line('walk', p.walk0 && p.walk0.path, st.origin, p.walk0Pt);
+    for (const s of steps) {
+      const mode = s.type === 'BUS' ? 'bus' : s.type === 'SUBWAY' ? 'subway' : 'walk';
+      if (mode !== 'walk') link('walk', s.start);
+      if (s.type === 'BUS') mark(r.bus && r.bus.stop && s === p.boardStep && validPt(r.bus.stop) ? r.bus.stop : s.start, 'board', busLbl(s, p));
+      if (s.type === 'SUBWAY') mark(s.start, 'board', `${stationName(s.stops[0])} 승차`);
+      line(mode, s.path, s.start, s.end);
+      if (s.type === 'SUBWAY') mark(s.end, 'alight', `${stationName(s.stops[s.stops.length - 1])} 하차`);
+      else if (s.type === 'BUS') mark(s.end, 'alight', `${s.stops[s.stops.length - 1] || ''} 하차`);
+    }
+    link('walk', st.dest);
+  } else if (r.kind === 'transit') {                  // 기존 고정 경로(108번)·직선 추정: 좌표가 없어 직선으로만
+    const hb = { name: SC.hub.name, stNum: SC.subway.stNum, lat: SC.hub.lat, lng: SC.hub.lng, alight: { name: stName(DEST_ST), stNum: DEST_ST } };
+    const stop = r.bus && r.bus.stop && validPt(r.bus.stop) ? r.bus.stop : null;
+    if (stop) { link('walk', stop); mark(stop, 'board', `${r.bus.routeNo}번 승차`); }
+    link('bus', hb);
+    subway(hb); tail();
+  } else if (r.kind === 'taxi') {
+    const d = st.drive.dest;
+    mark(st.origin, 'board', '택시 승차');
+    line('taxi', d && d.path, st.origin, st.dest);
+    link('walk', st.dest);
+  } else if (r.kind === 'tashu' || r.kind === 'tashuMix') {
+    if (tStart) {
+      line('walk', legPath('walkStart'), st.origin, tStart);
+      mark(tStart, 'dock', `대여 · ${tStart.name}`);
+    }
+    const from = tStart || st.origin;
+    if (r.kind === 'tashu') {
+      const end = LG.endDest && validPt(LG.endDest) ? LG.endDest : null;
+      link('walk', from);
+      line('bike', legPath('bikeDest'), from, end || st.dest);
+      if (end) mark(end, 'dock', `반납 · ${end.name}`);
+    } else {
+      const hb = r.hub, end = (LG.endHub || {})[hb.stNum];
+      link('walk', from);
+      line('bike', legPath('bikeHub:' + hb.stNum), from, validPt(end) ? end : hb);
+      if (validPt(end)) { mark(end, 'dock', `반납 · ${end.name}`); link('walk', end); line('walk', legPath('walkHub:' + hb.stNum), end, hb); }
+      subway(hb); tail();
+    }
+  } else if (r.kind === 'taxiMix' && r.hub) {
+    const d = (st.drive.hub || {})[r.hub.stNum];
+    mark(st.origin, 'board', '택시 승차');
+    line('taxi', d && d.path, st.origin, r.hub);
+    subway(r.hub); tail();
+  } else return null;
+  if (!parts.length) return null;
+  marks.unshift({ pt: ptOf(st.origin), kind: 'origin', label: st.origin.name || '출발' });
+  marks.push({ pt: ptOf(st.dest), kind: 'dest', label: st.dest.name || '도착' });
+  return { parts, marks };
+}
 const minsVs = (r, base) => Math.round((r.arrive - base.arrive) / 60000);
 // 도착 시각(화면에 보이는 분) → 요금 순서 (같으면 원래 순서 유지)
 const byArriveFare = (a, b) => Math.floor(a.arrive / 60000) - Math.floor(b.arrive / 60000) || (a.fare ?? Infinity) - (b.fare ?? Infinity);
@@ -1287,7 +1416,27 @@ function render() {
   $('#tabCompare').classList.toggle('on', st.tab === 'compare'); $('#tabCompare').setAttribute('aria-selected', st.tab === 'compare');
   $('#tabStops').classList.toggle('on', st.tab === 'stops'); $('#tabStops').setAttribute('aria-selected', st.tab === 'stops');
   if (st.tab === 'compare') renderCompare(c); else renderStops(c);
+  if (st.tab === 'compare') shapeDebug();
   $('#updated').textContent = st.updated ? `버스 도착정보 ${clock(st.updated)} 기준 · 30초마다 자동 갱신` : '';
+}
+
+// 지도 표시 2단계 확인용 (update14): 내 PC(localhost)에서 주소에 ?debug=shape 를 붙이면 경로별 모양 요약을 개발자도구 콘솔에 출력
+//   (화면·배포에는 영향 없음 · 3단계에서 지도에 그리면 제거 예정)
+function shapeDebug() {
+  try {
+    if (!['localhost', '127.0.0.1'].includes(location.hostname) || !/[?&]debug=shape\b/.test(location.search || '')) return;
+    const m = (a, b) => Math.round(dist(a, b));
+    const rows = computeRoutes(st.allow).list.map((r) => {
+      const sh = routeShape(r);
+      if (!sh) return { 경로: r.name, 부제: r.sub, 모양: '없음' };
+      let gap = 0; for (let i = 1; i < sh.parts.length; i++) { const a = sh.parts[i - 1].pts, b = sh.parts[i].pts; gap = Math.max(gap, m(a[a.length - 1], b[0])); }
+      const lp = sh.parts[sh.parts.length - 1].pts;
+      return { 경로: r.name, 부제: r.sub, 구간: sh.parts.map((q) => `${q.mode}${q.approx ? '(직선)' : ''}:${q.pts.length}`).join(' → '),
+        '출발지와 거리(m)': m(sh.parts[0].pts[0], st.origin), '도착지와 거리(m)': m(lp[lp.length - 1], st.dest), '구간 끊김 최대(m)': gap, 표시: sh.marks.map((x) => x.label).join(' / ') };
+    });
+    console.log(`[지도 모양 확인] ${clock(Date.now())} · ${st.origin.name} → ${st.dest.name}`);
+    console.table(rows);
+  } catch (e) { console.warn('[지도 모양 확인] 오류', e); }
 }
 
 /* ---------------- 검색 (카카오 로컬 · 서버에서 REST 키 사용) ---------------- */

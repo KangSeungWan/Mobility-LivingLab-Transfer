@@ -27,7 +27,7 @@ function loadApp({ fetchImpl, now, doc }) {
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/scenario.js'), 'utf8'), ctx);
   let src = fs.readFileSync(path.join(ROOT, 'public/app.js'), 'utf8');
-  src = src.replace(/\nstart\(\);\n\}\)\(\);\s*$/, '\nwindow.__T = { st, SC, computeRoutes, pickBest, loadStops, loadArrivals, loadDrives, setPoint, search, selectOrigin, stationNum, loadTimetables, loadTransit, loadHubs, tashuFee, stationFromPlace, routeKey, hubCands, pickHubs, render, setAllowCustom, setAllowFixed, parseAllow };\n})();');
+  src = src.replace(/\nstart\(\);\n\}\)\(\);\s*$/, '\nwindow.__T = { st, SC, computeRoutes, pickBest, loadStops, loadArrivals, loadDrives, setPoint, search, selectOrigin, stationNum, loadTimetables, loadTransit, loadHubs, tashuFee, stationFromPlace, routeKey, hubCands, pickHubs, render, setAllowCustom, setAllowFixed, parseAllow, routeShape, cleanPath, loadLegs };\n})();');
   vm.runInContext(src, ctx);
   return ctx.window.__T;
 }
@@ -1481,6 +1481,82 @@ function world(o = {}) {
     const bytes = JSON.stringify(T14.parseTransit(many)).length;
     ok('S14-12 최악의 경우(15경로·구간마다 60점) 대중교통 응답 크기 70KB 이하', bytes < 70000, `${Math.round(bytes / 1024)}KB`);
     process.env.MOCK = '1';
+  }
+
+  /* ===== update14 2단계: 지도 표시용 경로 모양 routeShape (그리기 전 데이터 · 화면 변경 없음) (M14) ===== */
+  {
+    const P = { lat: 36.3640, lng: 127.3420 }, BUS0 = { lat: 36.3632, lng: 127.3428 }, HEAD = { lat: 36.3632, lng: 127.3438 };
+    const HUB = { lat: 36.3610, lng: 127.3710 }, MID = { lat: 36.3500, lng: 127.4000 }, DST = { lat: 36.3324, lng: 127.4343 }, GUAM = { lat: 36.3560, lng: 127.3300 };
+    const ll = (...xs) => xs.map((q) => [q.lat, q.lng]);
+    const stepsP = (withPath = true) => [
+      { type: 'WALKING', sec: 180, m: 200, stops: [], vehicles: [], start: P, end: BUS0, path: withPath ? ll(P, { lat: 36.3636, lng: 127.3420 }, BUS0) : null },
+      { type: 'BUS', sec: 600, m: 3000, stops: ['궁동네거리', '유성구청', '갑천역'], vehicles: [{ name: '104', type: '일반' }], start: BUS0, head: HEAD, end: HUB, path: withPath ? ll(BUS0, HEAD, { lat: 36.3620, lng: 127.3600 }, HUB) : null },
+      { type: 'WALKING', sec: 120, m: 100, stops: [], vehicles: [], start: HUB, end: HUB, path: null },
+      { type: 'SUBWAY', sec: 1500, m: 9000, stops: ['갑천', '월평', '대전역'], vehicles: [{ name: '1호선', type: '' }], start: HUB, end: DST, path: withPath ? ll(HUB, MID, DST) : null },
+    ];
+    const tashuF = (x) => ({ mock: false, stations: [x.includes('lat=36.33') ? { id: 'TD', name: '대전역 대여소', d: 80, bikes: 2, lat: 36.3330, lng: 127.4340 }
+      : x.includes('lat=36.36') && !x.includes('lat=36.364') ? { id: 'TH', name: '갑천역 대여소', d: 90, bikes: 3, lat: 36.3615, lng: 127.3700 } : { id: 'T1', name: '출발대여소', d: 120, bikes: 5, lat: P.lat + 0.001, lng: P.lng }] });
+    const mk = async (o = {}) => {
+      const w = world({ cfg: { route: true }, api: {
+        '/api/transit': () => ({ at: 0, routes: [{ type: 'BUS_AND_SUBWAY', totalSec: 2600, fare: 1550, steps: stepsP(o.path !== false) }] }),
+        '/api/stops': () => ({ stops: [{ id: 'DJB_X', no: '41111', name: '궁동네거리', lat: BUS0.lat, lng: BUS0.lng }] }),
+        '/api/arrivals': (u, now) => ({ at: now.t, list: [{ routeNo: '104', routeId: 'DJBR104', arrSec: 600, prevCnt: 3 }] }),
+        '/api/subway': () => timetable(23), '/api/tashu': tashuF,
+        '/api/stations': () => ({ stations: o.guam ? [{ name: '구암역 대전1호선', lat: GUAM.lat, lng: GUAM.lng }] : [] }),
+        '/api/walk': (u) => ({ sec: 240, m: 300, path: o.legPath === false ? null : o.badPath ? [[null, 1], ['x', 127]] : (() => { const q = new URLSearchParams(u.split('?')[1]); return [[+q.get('olat'), +q.get('olng')], [(+q.get('olat') + +q.get('dlat')) / 2, +q.get('olng')], [+q.get('dlat'), +q.get('dlng')]]; })() }),
+        '/api/bike': (u) => { const q = new URLSearchParams(u.split('?')[1]); return { sec: 600, m: 2500, path: o.legPath === false ? null : [[+q.get('olat'), +q.get('olng')], [+q.get('olat'), +q.get('dlng')], [+q.get('dlat'), +q.get('dlng')]] }; },
+        '/api/drive': (u) => { const q = new URLSearchParams(u.split('?')[1]); return { durationSec: 1500, distanceM: 11000, taxiFare: 13000, path: o.drivePath === false ? null : [[+q.get('olat'), +q.get('olng')], [+q.get('olat'), +q.get('dlng')], [+q.get('dlat'), +q.get('dlng')]] }; },
+      } });
+      w.T.SC.bus.verifiedStops['104'] = ['DJB_X'];
+      w.T.st.subway = null; w.T.st.presetPos.haksa = { ...P };
+      w.T.st.origin = { key: 'haksa', name: '학사마을(시험)', lat: P.lat, lng: P.lng, verified: true }; w.T.st.originKey = 'haksa';
+      await w.T.loadStops();
+      const { list } = w.T.computeRoutes();
+      const by = (k) => list.find((r) => r.kind === k);
+      return { w, list, by, S: (r) => w.T.routeShape(r) };
+    };
+    const D = (a, b) => { const kx = Math.cos(a.lat * Math.PI / 180) * 111320; return Math.hypot((a.lng - b.lng) * kx, (a.lat - b.lat) * 110540); };
+    const first = (sh) => sh.parts[0].pts[0], lastPt = (sh) => { const q = sh.parts[sh.parts.length - 1]; return q.pts[q.pts.length - 1]; };
+    const allValid = (sh) => sh.parts.every((q) => q.pts.length >= 2 && q.pts.every((x) => Number.isFinite(x.lat) && Number.isFinite(x.lng) && x.lat > 33 && x.lat < 39 && x.lng > 124 && x.lng < 132));
+    const gaps = (sh) => { let g = 0; for (let i = 1; i < sh.parts.length; i++) g = Math.max(g, D(sh.parts[i - 1].pts[sh.parts[i - 1].pts.length - 1], sh.parts[i].pts[0])); return g; };
+
+    let u = await mk();
+    const tsh = u.S(u.by('transit'));
+    ok('M14-01 일반 대중교통: 카카오 구간 좌표로 도보→버스→지하철 (직선 대체 없음) · 승차·하차 표시', tsh && tsh.parts.map((q) => q.mode).join(',') === 'walk,bus,subway' && tsh.parts.every((q) => !q.approx)
+      && tsh.marks.some((m) => m.kind === 'board' && /104번 승차/.test(m.label)) && tsh.marks.some((m) => m.kind === 'board' && /갑천역 승차/.test(m.label)) && tsh.marks.some((m) => m.kind === 'alight' && /대전역 하차/.test(m.label)),
+      tsh && tsh.parts.map((q) => `${q.mode}${q.approx ? '~' : ''}${q.pts.length}`).join(' '));
+    ok('M14-02 출발·도착 표시가 처음·끝, 선의 시작=출발지·끝=도착지(30m 이내), 구간 사이 끊김 없음', tsh.marks[0].kind === 'origin' && tsh.marks[tsh.marks.length - 1].kind === 'dest' && D(first(tsh), P) < 30 && D(lastPt(tsh), DST) < 30 && gaps(tsh) < 1, `끊김 최대 ${gaps(tsh).toFixed(1)}m`);
+    const xsh = u.S(u.by('taxi'));
+    ok('M14-03 택시: 카카오 자동차 길찾기 좌표 그대로 (직선 대체 없음)', xsh.parts.length === 1 && xsh.parts[0].mode === 'taxi' && !xsh.parts[0].approx && xsh.parts[0].pts.length === 3 && D(lastPt(xsh), DST) < 30);
+    const msh = u.S(u.by('tashuMix'));
+    ok('M14-04 타슈 연계: 도보→타슈→도보→지하철→(목적지) · 타슈·도보는 길찾기 좌표, 지하철은 카카오 지하철 구간을 환승역부터', msh && msh.parts.map((q) => q.mode).join(',').startsWith('walk,bike,walk,subway') && msh.parts.filter((q) => q.mode !== 'subway').every((q) => !q.approx)
+      && msh.parts.find((q) => q.mode === 'subway').pts.some((x) => x.lat === MID.lat && x.lng === MID.lng) && msh.marks.filter((m) => m.kind === 'dock').length === 2 && D(lastPt(msh), DST) < 30 && gaps(msh) < 1,
+      msh && msh.parts.map((q) => `${q.mode}${q.approx ? '~' : ''}`).join(' '));
+    const esh = u.S(u.by('taxiMix'));
+    ok('M14-05 택시 연계: 택시(길찾기 좌표)→지하철, 환승역 승차·대전역 하차 표시', esh.parts[0].mode === 'taxi' && !esh.parts[0].approx && esh.parts.some((q) => q.mode === 'subway' && !q.approx) && esh.marks.some((m) => /갑천역 승차/.test(m.label)) && esh.marks.some((m) => /대전역 하차/.test(m.label)));
+    const csh = u.S(u.by('tashu'));
+    ok('M14-06 전 구간 타슈: 도보→타슈(대전역 대여소까지) · 대여·반납 표시 · 반납 후 도보는 그리지 않음', csh.parts.map((q) => q.mode).join(',') === 'walk,bike' && csh.marks.some((m) => /반납 · 대전역 대여소/.test(m.label)));
+    ok('M14-07 화면에 나온 모든 경로에 모양이 있고 좌표가 모두 정상', u.list.every((r) => { const sh = u.S(r); return sh && allValid(sh); }), u.list.map((r) => r.kind).join(','));
+    const before = JSON.stringify(u.w.calls), r0 = JSON.stringify(u.by('transit').steps);
+    u.list.forEach((r) => u.S(r));
+    ok('M14-08 모양 계산은 외부 호출 없음 · 경로 계산 결과를 바꾸지 않음', JSON.stringify(u.w.calls) === before && JSON.stringify(u.by('transit').steps) === r0);
+    ok('M14-09 도보·자전거·택시 좌표를 화면 상태에 보관 (정상 좌표만 {lat,lng})', Array.isArray(u.w.T.st.legs.walkStart.v.path) && u.w.T.st.legs.walkStart.v.path[0].lat === P.lat && Array.isArray(u.w.T.st.drive.dest.path));
+
+    u = await mk({ path: false, legPath: false, drivePath: false });
+    const t2 = u.S(u.by('transit')), x2 = u.S(u.by('taxi')), m2 = u.S(u.by('tashuMix'));
+    ok('M14-10 좌표가 없으면 직선(approx)으로 대체 · 그래도 출발→도착이 이어짐', t2.parts.some((q) => q.approx) && x2.parts[0].approx && x2.parts[0].pts.length === 2 && m2.parts.every((q) => q.approx) && D(first(t2), P) < 30 && D(lastPt(t2), DST) < 30 && gaps(t2) < 1 && gaps(m2) < 1,
+      t2.parts.map((q) => `${q.mode}${q.approx ? '~' : ''}`).join(' '));
+
+    u = await mk({ badPath: true });
+    ok('M14-11 비정상 좌표(null·문자)만 온 도보 경로는 버리고 직선으로 대체', u.w.T.st.legs.walkStart.v.path === null && u.S(u.by('tashuMix')).parts[0].approx);
+    ok('M14-12 cleanPath: [[위도,경도]] → {lat,lng}, 비정상 제외, 2점 미만 null', JSON.stringify(u.w.T.cleanPath([[36.1, 127.1], [null, 1], [36.2, 127.2], 'x'])) === JSON.stringify([{ lat: 36.1, lng: 127.1 }, { lat: 36.2, lng: 127.2 }]) && u.w.T.cleanPath([[36.1, 127.1]]) === null && u.w.T.cleanPath(null) === null);
+
+    // 카카오 경로에 없는 더 먼 환승역(구암 117): 지하철 선은 가장 가까운 카카오 지하철 구간까지 직선 + 나머지 카카오 좌표
+    u = await mk({ guam: true });
+    const g = u.w.T.computeRoutes().mix.taxi.find((r) => r.hub.stNum === '117');
+    const gs = g ? u.S(g) : null, subs = gs ? gs.parts.filter((q) => q.mode === 'subway') : [];
+    ok('M14-13 카카오 경로 밖 환승역: 직선 연결(approx) 후 카카오 지하철 좌표로 이어짐', subs.length === 2 && subs[0].approx && !subs[1].approx && D(subs[0].pts[0], GUAM) < 1 && gaps(gs) < 1, subs.map((q) => `${q.approx ? '~' : ''}${q.pts.length}`).join(' '));
+    ok('M14-14 출발·목적지 좌표가 없으면 모양 없음(null) · 알 수 없는 경로 유형도 null', (() => { const o0 = u.w.T.st.origin; u.w.T.st.origin = { name: 'x' }; const a = u.S(u.by('taxi')); u.w.T.st.origin = o0; return a === null && u.S({ kind: 'zzz' }) === null && u.S(null) === null; })());
   }
 
   console.log(`\n결과: 통과 ${pass} / 실패 ${fail}`);
