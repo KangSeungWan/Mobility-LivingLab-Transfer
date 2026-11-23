@@ -27,7 +27,7 @@ function loadApp({ fetchImpl, now, doc }) {
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/scenario.js'), 'utf8'), ctx);
   let src = fs.readFileSync(path.join(ROOT, 'public/app.js'), 'utf8');
-  src = src.replace(/\nstart\(\);\n\}\)\(\);\s*$/, '\nwindow.__T = { st, SC, computeRoutes, pickBest, loadStops, loadArrivals, loadDrives, setPoint, search, selectOrigin, stationNum, loadTimetables, loadTransit, loadHubs, tashuFee, stationFromPlace, routeKey, hubCands, pickHubs, render, setAllowCustom, setAllowFixed, parseAllow, routeShape, cleanPath, loadLegs, drawRoute, mapRouteOf, clearRoute, showOnMap, setMap: (m) => { MAP = m; }, destSt, invalidate, loadDestSt };\n})();');
+  src = src.replace(/\nstart\(\);\n\}\)\(\);\s*$/, '\nwindow.__T = { st, SC, computeRoutes, pickBest, loadStops, loadArrivals, loadDrives, setPoint, search, selectOrigin, stationNum, loadTimetables, loadTransit, loadHubs, tashuFee, stationFromPlace, routeKey, hubCands, pickHubs, render, setAllowCustom, setAllowFixed, parseAllow, routeShape, cleanPath, loadLegs, drawRoute, mapRouteOf, clearRoute, showOnMap, setMap: (m) => { MAP = m; }, destSt, invalidate, loadDestSt, supported, supportWhy, subwayRideTest: subwayRide, healTransit };\n})();');
   vm.runInContext(src, ctx);
   return ctx.window.__T;
 }
@@ -103,8 +103,8 @@ function world(o = {}) {
   ok('목적지 변경: 택시 길찾기 재사용 없이 두 구간 모두 다시 조회 (update11)', w.calls['/api/drive'] === 4);
   await w.T.loadStops(true);
   ok('새로고침 버튼: 길찾기 다시 조회(+2)', w.calls['/api/drive'] === 6);
-  w.T.setPoint('origin', { name: '멀리', lat: 36.40, lng: 127.40 }); await new Promise((r) => setTimeout(r, 30));
-  ok('비교 구간(1km) 밖: 길찾기 호출 안 함', w.calls['/api/drive'] === 6);
+  w.T.setPoint('origin', { name: '멀리', lat: 36.70, lng: 127.40 }); await new Promise((r) => setTimeout(r, 30));
+  ok('대전 지역 밖(update15: 지원 범위 = 대전 전체): 길찾기 호출 안 함', w.calls['/api/drive'] === 6);
 
   w = world({ delay: 30 }); w.T.st.subway = timetable(23); await w.T.loadStops();
   const before = w.calls['/api/arrivals'];
@@ -299,7 +299,7 @@ function world(o = {}) {
       { type: 'BUS', sec: 420, m: 2000, stops: ['대전역', '대동'], vehicles: [{ name: '601', type: '간선' }], start: { lat: 36.3324, lng: 127.4343 }, end: null },
       { type: 'WALKING', sec: 60, m: 50, stops: [], vehicles: [], start: null, end: null }] });
     const sA = u.by.A.steps, iSub = sA.findIndex((x) => x.type === 'sub'), iBw = sA.findIndex((x, i) => i > iSub && x.type === 'wait');
-    ok('R10-07 지하철 이후 버스: 앞선 이동·대기 뒤에 이어서 계산 · 실시간 대신 환승 대기 가정(미확인)', u.w.T.st.plans[0].board === null && iBw > iSub && sA[iBw].start >= sA[iSub].end && u.by.A.avail === 'unknown' && u.by.A.why.some((x) => x.includes('환승 버스')), u.by.A.why.join(' / '));
+    ok('R10-07 지하철 이후 버스: 앞선 이동·대기 뒤에 이어서 계산 · 실시간 대신 환승 대기 가정 (update15 방식 B: 환승 대기만 가정이면 확인됨 + 환승 대기 추정 표시)', u.w.T.st.plans[0].board === null && iBw > iSub && sA[iBw].start >= sA[iSub].end && u.by.A.avail === 'ok' && u.by.A.est.length === 1 && !u.by.A.why.some((x) => x.includes('환승 버스')), u.by.A.why.join(' / '));
 
     // 4) 버스 대기시간
     u = await setup({ walk0: 1800, arrivals: (x, now) => ({ at: now.t, list: [{ routeNo: '104', routeId: 'DJBR104', arrSec: 120, prevCnt: 1 }] }) });
@@ -1695,6 +1695,102 @@ function world(o = {}) {
     const shp = w.T.routeShape(mixT);
     ok('D15-15 지도 모양: 하차역 이후 도보 선이 목적지에서 끝남', shp && (() => { const q = shp.parts[shp.parts.length - 1]; const e = q.pts[q.pts.length - 1]; return q.mode === 'walk' && Math.abs(e.lat - 36.33) < 1e-6 && Math.abs(e.lng - 127.43) < 1e-6; })());
     ok('D15-16 하차역 안내 문구 상태: 자동 선택된 하차역 이름·거리', w.T.st.destSt && w.T.st.destSt.name === '중앙로역' && Math.round(w.T.st.destSt.d) > 0);
+  }
+
+  /* ===== update15 3단계: 지원 범위 = 대전 전체 (S15) ===== */
+  {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const w = world({});
+    const at = (o, d) => { w.T.st.origin = { name: 'o', ...o }; w.T.st.dest = { name: 'd', ...d }; return [w.T.supported(), w.T.supportWhy()]; };
+    let r = at({ lat: 36.4270, lng: 127.3900 }, { lat: 36.3010, lng: 127.4580 });   // 관평동 → 대전 동구 남쪽
+    ok('S15-01 대전 안 아무 곳 → 아무 곳: 지원 (출발지 4곳·대전역 1km 제한 없음)', r[0] === true && r[1] === null);
+    r = at({ lat: 36.70, lng: 127.40 }, { lat: 36.33, lng: 127.43 });
+    ok('S15-02 출발지가 대전 밖 → 미지원 · 이유 안내', r[0] === false && /출발지가 대전 지역 밖/.test(r[1]));
+    r = at({ lat: 36.36, lng: 127.34 }, { lat: 36.33, lng: 127.70 });
+    ok('S15-03 도착지가 대전 밖 → 미지원 · 이유 안내', r[0] === false && /도착지가 대전 지역 밖/.test(r[1]));
+    r = at({ lat: 36.3600, lng: 127.3400 }, { lat: 36.3620, lng: 127.3410 });
+    ok('S15-04 출발·도착이 500m 미만 → 미지원 · 이유 안내', r[0] === false && /너무 가까워요/.test(r[1]));
+    r = at({ lat: 36.36, lng: 127.34 }, { name: 'x' });
+    ok('S15-05 좌표 없는 위치 → 미지원(오류 없음)', r[0] === false);
+
+    // 지하철역에서 먼 출발지(관평동): 기본 환승역(월평, 4km 밖) 가정값을 끼워 넣지 않음
+    const w2 = world({ cfg: { route: true }, fail: ['/api/transit'], api: { '/api/stations': () => ({ stations: [] }) } });
+    w2.T.st.subway = null;
+    w2.T.st.origin = { name: '관평동', lat: 36.4270, lng: 127.3900 }; w2.T.st.originKey = null;
+    w2.T.st.dest = { name: '대전역', ...w2.T.SC.dest };
+    await w2.T.loadStops();
+    const r2 = w2.T.computeRoutes();
+    ok('S15-06 근처 4km 안에 지하철역이 없는 출발지: 기본 환승역(월평) 가정 없음 → 지하철 연계 복합경로 없음 · 대중교통은 버스 추정', r2.hubs.length === 0 && !r2.list.some((x) => x.mix) && r2.list.find((x) => x.kind === 'transit').name === '버스',
+      r2.list.map((x) => `${x.kind}:${x.name}`).join(', '));
+    // 대전 안 다른 구간에서 화면 렌더링·지도 모양 오류 없음
+    ok('S15-07 대전 다른 구간: 화면·지도 모양 계산 오류 없음', (() => { try { w2.T.st.tab = 'compare'; w2.T.render(); r2.list.forEach((x) => w2.T.routeShape(x)); return true; } catch (e) { return false; } })());
+  }
+
+  /* ===== update15 3단계 보완: 종착역(판암·반석) 방향 지하철 소요시간 = 공식 역간 소요시간 (S15) ===== */
+  {
+    const w = world({});
+    const hb = { name: '월평역', stNum: '114', pair: '114-101', dir: '0', alight: { name: '판암역', stNum: '101' } };
+    w.T.st.subway = null;
+    w.T.st.dist = { '114-101': { km: 12.3, min: 25, sec: 10 } };
+    const r = w.T.subwayRideTest(hb, '0');
+    ok('S15-08 시각표로 소요시간을 못 구하는 종착역 방향(114→101): 공식 역간 소요시간 25분 10초 · 확인값(가정 아님)', r.ok === true && Math.abs(r.min - (25 + 10 / 60)) < 1e-9 && /공식 역간 소요시간/.test(r.note), JSON.stringify(r));
+    w.T.st.dist = { '114-101': { err: '실패' } };
+    const r2 = w.T.subwayRideTest(hb, '0');
+    ok('S15-09 공식 역간 소요시간도 없으면 기존처럼 추정(미확인)', r2.ok === false, JSON.stringify(r2));
+  }
+
+  /* ===== update15 3단계 보완: 출발지 로딩 중 목적지 변경 · 대중교통 후보 안전장치 (R15) ===== */
+  {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const O = { lat: 36.3576, lng: 127.3728 }, D = { lat: 36.3505, lng: 127.3848 };
+    const tr = () => ({ at: 0, routes: [{ type: 'SUBWAY', totalSec: 1700, fare: 1550, steps: [{ type: 'SUBWAY', sec: 1500, m: 9000, stops: ['갈마', '시청'], vehicles: [{ name: '1호선', type: '' }], start: O, end: D }] }] });
+    const w = world({ cfg: { route: true }, delayOf: (u) => (u.startsWith('/api/stops') ? 200 : 5), api: { '/api/transit': tr, '/api/stations': () => ({ stations: [] }) } });
+    w.T.st.subway = null;
+    w.T.setPoint('origin', { name: '갈마', ...O }); await sleep(40);
+    const stopsBefore = w.calls['/api/stops'] || 0;
+    w.T.setPoint('dest', { name: '시청', ...D }); await sleep(900);
+    ok('R15-01 출발지 로딩 중 목적지 변경: 처음부터 다시 불러옴(근처 정류장 재조회) · 대중교통 후보 채워짐', w.T.st.plans.length === 1 && (w.calls['/api/stops'] || 0) > stopsBefore && !w.T.st.loading, `plans ${w.T.st.plans.length} · stops ${stopsBefore}→${w.calls['/api/stops']}`);
+    const t0 = w.calls['/api/transit'];
+    w.T.st.plans = []; w.T.st.planWhy = null; w.T.st.healKey = null;
+    await w.T.healTransit();
+    ok('R15-02 안전장치: 로딩 후 후보가 비었고 실패 이유도 없으면 1번 다시 조회해 채움', w.T.st.plans.length === 1 && w.calls['/api/transit'] === t0 + 1);
+    w.T.st.plans = []; w.T.st.planWhy = null;
+    await w.T.healTransit();
+    ok('R15-03 같은 구간에서는 다시 조회 1번만 (호출 반복 방지)', w.calls['/api/transit'] === t0 + 1);
+    w.T.st.plans = []; w.T.st.planWhy = '대중교통 길찾기 실패 (조회 실패)'; w.T.st.healKey = null;
+    await w.T.healTransit();
+    ok('R15-04 실패 이유가 있으면(진짜 실패) 다시 조회하지 않음', w.calls['/api/transit'] === t0 + 1);
+  }
+
+  /* ===== update15 방식 B: 환승 버스 대기만 가정값이면 확인됨으로 인정 (T15) ===== */
+  {
+    const P = { lat: 36.3640, lng: 127.3420 }, BUS0 = { lat: 36.3632, lng: 127.3428 }, HEAD = { lat: 36.3632, lng: 127.3438 }, X1 = { lat: 36.3500, lng: 127.3800 }, X2 = { lat: 36.3400, lng: 127.4000 }, DST = { lat: 36.3324, lng: 127.4343 };
+    const bus = (no, a, b, stops) => ({ type: 'BUS', sec: 600, m: 3000, stops, vehicles: [{ name: no, type: '일반' }], start: a, head: { lat: a.lat, lng: a.lng + 0.001 }, end: b });
+    const walk = (a, b) => ({ type: 'WALKING', sec: 120, m: 100, stops: [], vehicles: [], start: a, end: b });
+    const mk = async (steps, o = {}) => {
+      const w = world({ cfg: { route: true }, api: {
+        '/api/transit': () => ({ at: 0, routes: [{ type: 'BUS', totalSec: 3000, fare: 1500, steps }] }),
+        '/api/stops': () => ({ stops: [{ id: 'DJB_X', no: '41111', name: '궁동네거리', lat: BUS0.lat, lng: BUS0.lng }] }),
+        '/api/arrivals': (u, now) => ({ at: now.t, list: [{ routeNo: '104', routeId: 'DJBR104', arrSec: 600, prevCnt: 3 }] }),
+        '/api/subway': () => timetable(23), '/api/stations': () => ({ stations: [] }) } });
+      w.T.SC.bus.verifiedStops['104'] = ['DJB_X'];
+      if (o.max != null) w.T.SC.transit.transferEstMax = o.max;
+      w.T.st.subway = null; w.T.st.presetPos.haksa = { ...P };
+      w.T.st.origin = { key: 'haksa', name: '시험', lat: P.lat, lng: P.lng, verified: true }; w.T.st.originKey = 'haksa';
+      await w.T.loadStops();
+      const r = w.T.computeRoutes(), t = r.list.find((x) => x.kind === 'transit');
+      return { w, r, t, best: w.T.pickBest(r.list) };
+    };
+    let u = await mk([walk(P, BUS0), bus('104', BUS0, X1, ['궁동네거리', '중간', '환승정류장']), walk(X1, X1), bus('66', X1, DST, ['환승정류장', '중간2', '대전역'])]);
+    ok('T15-01 버스→버스(환승 1회): 첫 버스 실시간 + 환승 대기만 가정 → 확인됨(ok) · 환승 대기 추정 표시 · 비교 기준이 됨', u.t.avail === 'ok' && u.t.est.length === 1 && /1회/.test(u.t.est[0]) && u.r.baseline === u.t && !!u.best, `${u.t.avail} · ${u.t.est.join()} · ${u.t.why.join()}`);
+    const tw = u.t.steps.find((x) => /환승 대기/.test(x.label));
+    ok('T15-02 단계별 시각에는 환승 대기가 가정값으로 그대로 보임 (5분)', tw && Math.round(tw.min) === 5 && /가정값/.test(tw.note));
+    u = await mk([walk(P, BUS0), bus('104', BUS0, X1, ['궁동네거리', '중간', '환승1']), walk(X1, X1), bus('66', X1, X2, ['환승1', '중간', '환승2']), walk(X2, X2), bus('77', X2, DST, ['환승2', '중간', '대전역'])]);
+    ok('T15-03 환승 버스 2회: 기존대로 가정값 포함(추천 제외)', u.t.avail === 'unknown' && u.t.why.includes('환승 버스 대기는 가정값') && !u.t.est.length);
+    u = await mk([walk(P, BUS0), bus('104', BUS0, X1, ['궁동네거리', '중간', '환승정류장']), walk(X1, X1), bus('66', X1, DST, ['환승정류장', '중간2', '대전역'])], { max: 0 });
+    ok('T15-04 transferEstMax=0 이면 이전 방식(A): 가정값 포함', u.t.avail === 'unknown' && !u.t.est.length);
+    u = await mk([walk(P, BUS0), bus('999', BUS0, X1, ['궁동네거리', '중간', '환승정류장']), walk(X1, X1), bus('66', X1, DST, ['환승정류장', '중간2', '대전역'])]);
+    ok('T15-05 환승 대기 말고 다른 가정값(첫 버스 방향 미확인 등)이 섞이면 기존대로 가정값 포함', u.t.avail === 'unknown' && !u.t.est.length && u.t.why.length >= 1, u.t.why.join(' / '));
   }
 
   console.log(`\n결과: 통과 ${pass} / 실패 ${fail}`);

@@ -7,8 +7,9 @@ const DRIVE_STALE_MS = 15 * 60000; // 이보다 오래된 택시 결과는 '확�
 const TASHU_STALE_MS = 3 * 60000;
 const ROUTE_STALE_MS = 15 * 60000; // 화면에 표시 중인 카카오 대중교통·도보·자전거 결과가 이보다 오래되면 '확인됨'으로 보지 않음
 const LEG_RETRY_MS = 5 * 60000;    // 실패한 도보·자전거 구간은 30초 갱신 때 바로 다시 부르지 않음 (새로고침·위치 변경 때는 다시 조회)
+const MAP_CLICK_MS = 400;           // 지도 클릭 → 위치 적용 지연 (연속 클릭 묶기)
 const RS = SC.search || {};        // 경로 탐색 범위·상한 (scenario.js search · update12)
-// 하차역 (update15): 목적지에서 내릴 지하철역. 1단계에서는 기본값(대전역 104)만 쓰고, 다음 단계에서 목적지마다 자동으로 정함
+// 하차역 (update15): 목적지에서 내릴 지하철역. 기본 목적지(대전역)면 104, 그 밖이면 loadDestSt()가 목적지 근처 역을 자동으로 정함
 //   { stNum, name, lat, lng, src } — src: 'default'(scenario.js 기본 목적지) · 이후 'route'(카카오 경로의 하차역)·'kakao'(목적지 근처 역 검색)
 //   st.destSt = { none: true } 이면 목적지 근처에 1호선 역이 없음 → null (지하철 복합경로를 만들지 않음)
 function destSt() {
@@ -97,10 +98,15 @@ const pairOf = (from, to) => `${from}-${to}`;
 const subDir = (from, to) => (Number(to) < Number(from) ? '0' : '1');   // 0=판암 방면(역번호 감소) · 1=반석 방면
 // 출발지 기준점(좌표가 있는 것만): scenario.js 좌표 또는 이번 세션에서 장소 검색으로 찾은 좌표
 const presetPos = (p) => (p.lat != null && p.lng != null ? p : st.presetPos[p.key] || null);
-function supported() {
-  if (dist(st.dest, SC.dest) > R) return false;
-  return SC.origins.some((p) => { const q = presetPos(p); return q && dist(st.origin, q) <= R; });
+// 경로 비교 지원 범위 (update15 3단계): 출발·목적지 모두 대전 안 + 둘 사이 minTripM 이상. 이유는 supportWhy()로 화면에 안내
+const inArea = (p) => { const A = SC.area || { s: 36.10, n: 36.60, w: 127.15, e: 127.65 }; return validPt(p) && p.lat >= A.s && p.lat <= A.n && p.lng >= A.w && p.lng <= A.e; };
+function supportWhy() {
+  if (!inArea(st.origin)) return '출발지가 대전 지역 밖이에요';
+  if (!inArea(st.dest)) return '도착지가 대전 지역 밖이에요';
+  if (dist(st.origin, st.dest) < (SC.minTripM || 500)) return `출발지와 도착지가 너무 가까워요 (${SC.minTripM || 500}m 이상 떨어진 곳을 골라 주세요)`;
+  return null;
 }
+const supported = () => !supportWhy();
 // 기존 고정 경로(108번·월평역)를 쓸 수 있는 출발지: 공대 3호관을 골랐거나, 직접 찍은 위치가 그 1km 안
 const legacyOrigin = () => st.originKey === SC.origins[0].key || (!st.originKey && dist(st.origin, SC.origins[0]) <= R);
 // 지금 위치(출발·목적지)와 위치 버전. 응답을 적용하기 전에 요청할 때의 값과 같은지 확인
@@ -166,7 +172,9 @@ const leafletAdapter = {
 };
 let MAP = null;
 async function initMap() {
-  const onClick = (lat, lng) => setPoint(st.pick, { name: '지도에서 선택한 위치', lat, lng }, true);
+  // 지도를 연달아 누르면 마지막 위치만 적용 (update15: 대전 어디서나 경로를 조회하므로 누를 때마다 카카오·공공데이터 호출이 몰리지 않게)
+  let tm = null;
+  const onClick = (lat, lng) => { const which = st.pick; clearTimeout(tm); tm = setTimeout(() => setPoint(which, { name: '지도에서 선택한 위치', lat, lng }, true), MAP_CLICK_MS); };
   const tries = st.cfg.kakaoJsKey ? [[kakaoAdapter, st.cfg.kakaoJsKey], [leafletAdapter]] : [[leafletAdapter]];
   for (const [ad, key] of tries) {
     try { await ad.load(key); ad.init($('#map'), st.origin, onClick); MAP = ad; drawPoints(true); if (st.tab === 'compare') render(); return; } catch { /* 다음 지도로 */ }
@@ -207,7 +215,8 @@ function setPoint(which, p, keepView) {
   $('#oName').textContent = st.origin.name; $('#dName').textContent = st.dest.name;
   drawPoints(!keepView);
   renderPresets();
-  if (which === 'origin') loadStops();
+  // 출발지 로딩이 아직 진행 중에 목적지를 바꾸면 처음부터 다시 불러옴 (update15: 두 로딩이 겹쳐 대중교통 후보가 비는 경우 방지)
+  if (which === 'origin' || st.loading) loadStops();
   else loadDest().then(render);
 }
 function setPick(which) {
@@ -307,6 +316,7 @@ async function loadStops(refresh) {
     await loadDestSt();                                  // 하차역: 대중교통 후보의 하차역도 후보로 쓰므로 그 뒤에
     if (gen !== st.gen) return;
     await Promise.all([loadArrivals(true, refresh), loadDrives(refresh), loadTimetables(refresh), loadDist(neededPairs())]);
+    if (gen === st.gen) await healTransit();
   } finally { if (gen === st.gen) { st.loading = false; render(); } }
 }
 // 하차역 자동 선택 (update15 2단계): 목적지 근처 1호선 역 중 목적지에 가장 가까운 역
@@ -338,9 +348,19 @@ async function loadDestSt() {
   st.destStWhy = best ? null : `목적지에서 ${(max / 1000).toFixed(1)}km 안에 1호선 역이 없어 지하철 연계 복합경로는 만들지 않아요${why ? ` (${why})` : ''}`;
 }
 // 목적지만 바뀌었을 때: 대중교통 후보·택시·도보/자전거·시각표를 새 목적지로 다시 (근처 지하철역은 출발지 기준이라 그대로)
+// 안전장치 (update15): 로딩이 끝났는데 대중교통 후보가 비어 있고 실패 이유도 없으면(겹친 요청이 모두 버려진 경우) 한 번 더 조회
+async function healTransit() {
+  if (!st.cfg.route || !supported() || st.plans.length || st.planWhy) return;
+  const k = tripKey();
+  if (st.healKey === k) return;                       // 같은 구간에서는 한 번만
+  st.healKey = k;
+  await loadTransit();
+  if (tripKey() === k) await Promise.all([loadTimetables(), loadDist(neededPairs())]);
+}
 async function loadDest() {
   await loadTransit();
   await loadDestSt();
+  await healTransit();
   await Promise.all([loadArrivals(true), loadDrives(), loadTimetables(), loadDist(neededPairs())]);
 }
 // 30초마다 부르는 갱신: 버스 도착정보와 타슈만. 카카오 길찾기(택시·대중교통·도보·자전거·지하철역 검색)는 화면의 결과를 그대로 쓰고 다시 부르지 않음
@@ -769,7 +789,7 @@ function hubCands() {
   for (const s of st.hubSearch) if (s.stNum !== destSt().stNum && !m.has(s.stNum)) m.set(s.stNum, { name: s.name, stNum: s.stNum, lat: s.lat, lng: s.lng, src: 'kakao' });
   for (const p of st.plans) if (p.hub && p.from !== destSt().stNum && !m.has(p.from)) m.set(p.from, { name: p.hub.name, stNum: p.from, lat: p.hub.lat, lng: p.hub.lng, src: 'route' });
   let list = [...m.values()];
-  if (!list.length && SC.subway.stNum !== destSt().stNum) list = [{ name: SC.hub.name, stNum: SC.subway.stNum, lat: SC.hub.lat, lng: SC.hub.lng, src: 'default' }];   // 기본 환승역이 하차역과 같으면 쓰지 않음
+  if (!list.length && SC.subway.stNum !== destSt().stNum && dist(st.origin, SC.hub) <= (RS.hubRadiusM || 4000)) list = [{ name: SC.hub.name, stNum: SC.subway.stNum, lat: SC.hub.lat, lng: SC.hub.lng, src: 'default' }];   // 기본 환승역이 하차역과 같으면 쓰지 않음
   return list.map((hb) => ({ ...hb, d: dist(st.origin, hb), pair: pairOf(hb.stNum, destSt().stNum), dir: subDir(hb.stNum, destSt().stNum), alight: { name: stName(destSt().stNum), stNum: destSt().stNum } }))
     .sort((a, b) => hubEst('tashu', a) - hubEst('tashu', b)).slice(0, RS.hubCandMax || 6);
 }
@@ -847,6 +867,10 @@ function subwayRide(hb, day) {
   if (set && fnum(set.ride) > 0) return { min: Number(set.ride), ok: true, note: '시각표 기준' };
   const conf = (SC.subway.rideConfirmed || {})[hb.pair];
   if (fnum(conf) > 0) return { min: Number(conf), ok: true, note: '확인된 소요시간' };
+  // 대전교통공사 공식 역간 소요시간 (update15): 종착역(판암 101·반석 122)으로 가는 방향은 시각표에 종착역 출발 시각이 없어
+  //   두 역 시각표로 소요시간을 맞출 수 없음 → 공식 역간 소요시간/거리 API의 min·sec 사용 (월평→대전역 19분 0초로 시각표와 일치 확인)
+  const ds = st.dist && st.dist[hb.pair];
+  if (ds && !ds.err && fnum(ds.min) >= 0 && fnum(ds.sec) >= 0 && Number(ds.min) * 60 + Number(ds.sec) > 0) return { min: Number(ds.min) + Number(ds.sec) / 60, ok: true, note: '공식 역간 소요시간' };
   const p = st.plans.find((x) => x.pair === hb.pair && fnum(x.subStep.sec) > 0);
   if (p) return { min: p.subStep.sec / 60, ok: false, note: '카카오 구간 시간', why: '열차 소요시간 시각표 없음 · 카카오 구간 시간' };
   const n = Math.abs(Number(hb.stNum) - Number(hb.alight.stNum));
@@ -894,13 +918,14 @@ const busLabel = (s, namesOf = busNames) => `${namesOf(s).join('·') || '버스'
 const rideSeg = (s, names) => ({ type: 'ride', min: secMin(s.sec), label: names ? `${names.join('·') || '버스'}번 버스` : busLabel(s), note: `${s.stops[0] || ''} → ${s.stops[s.stops.length - 1] || ''}${s.stops.length > 1 ? ` · ${s.stops.length - 1}정거장` : ''} · 카카오 길찾기` });
 // 처음 탄 교통수단 뒤에 오는 구간(지하철 하차 후 도보·버스 등): 도보는 카카오 구간 시간, 버스는 환승 대기 가정 + 승차, 그 밖은 지원하지 않음(미확인)
 //   namesOf: 그 경로의 요금 기준과 같은 노선 목록 (일반·마을버스 기준 요금이면 좌석버스 등 제외)
+const TRANSFER_EST = '환승 버스 대기는 가정값';   // status()가 횟수를 세서 방식 B 판정에 씀 (update15)
 function laterSegs(steps, unk, namesOf = busNames) {
   const out = [];
   steps.forEach((s, i) => {
     if (s.type === 'WALKING') out.push(walkSeg(s, i === steps.length - 1 ? `${st.dest.name}까지 도보` : '도보'));
     else if (s.type === 'BUS') {
       out.push({ type: 'wait', min: TR.transferWaitMin || 5, label: `${busLabel(s, namesOf)} 환승 대기`, note: '실시간 미연결 · 가정값' }, rideSeg(s, namesOf(s)));
-      unk.push('환승 버스 대기는 가정값');
+      unk.push(TRANSFER_EST);
     } else {
       out.push({ type: s.type === 'SUBWAY' ? 'sub' : 'ride', min: secMin(s.sec), label: s.guidance || s.type, note: '대기 미반영 · 카카오 구간 시간' });
       unk.push('지원하지 않는 복합 구간 포함');
@@ -968,7 +993,15 @@ function computeRoutes(allow = st.allow) {
   // legacy: 공대 3호관 → 대전역(기본 목적지) 고정값을 쓸 수 있는 경우만 (update15: 목적지를 옮기면 고정값을 쓰지 않음)
   const DS = destSt(), now = Date.now(), mock = !!st.cfg.mock, legacy = legacyOrigin() && !st.destSt, F = SC.fare, T = SC.tashu;
   const origUnk = st.origin.verified === false ? ['출발지 좌표 미확인'] : [];
-  const status = (no, unk) => { unk = [...unk, ...origUnk]; if (mock) unk = [...unk, '예시 데이터']; return { avail: no.length ? 'no' : unk.length ? 'unknown' : 'ok', why: [...new Set(no.length ? no : unk)] }; };
+  // 경로 상태 (update15 방식 B): 가정값이 '환승 버스 대기'뿐이고 transferEstMax회 이하면 확인됨(ok) + est 표시. 그 밖의 가정값이 있으면 unknown
+  const status = (no, unk) => {
+    unk = [...unk, ...origUnk]; if (mock) unk = [...unk, '예시 데이터'];
+    const tCnt = unk.filter((x) => x === TRANSFER_EST).length, rest = unk.filter((x) => x !== TRANSFER_EST);
+    const soft = tCnt > 0 && tCnt <= (TR.transferEstMax ?? 1) && !rest.length;
+    const hard = soft ? [] : unk;
+    return { avail: no.length ? 'no' : hard.length ? 'unknown' : 'ok', why: [...new Set(no.length ? no : hard)],
+      est: soft && !no.length ? [`환승 대기 추정 · 갈아타는 버스 ${tCnt}회 각 ${TR.transferWaitMin || 5}분 가정`] : [] };
+  };
   // 지하철 대기·승차 (모든 경로 공통 계산): hb = { name, stNum, pair, dir, alight:{name, stNum} }
   const subwaySegs = (before, hb, unk, no) => {
     const used = before.reduce((a, s) => a + s.min, 0);
@@ -984,7 +1017,7 @@ function computeRoutes(allow = st.allow) {
   const subFareOf = (pair) => { const z = subwayZone(pair); return z ? { fare: F.subway['zone' + z.zone], zone: z } : null; };
   const fareUnk = (hb, ok) => (ok ? [] : [`요금 미확인 (지하철 ${hb.name}→${hb.alight.name} 요금 구간 확인 필요)`]);
   const planStale = st.plans.length && now - st.plansAt > ROUTE_STALE_MS ? ['경로 정보가 오래됨 · 새로고침 필요'] : [];
-  const legacyHubObj = DS && DS.stNum !== SC.subway.stNum ? { name: SC.hub.name, stNum: SC.subway.stNum, lat: SC.hub.lat, lng: SC.hub.lng, src: 'default', pair: pairOf(SC.subway.stNum, DS.stNum), dir: subDir(SC.subway.stNum, DS.stNum), alight: { name: stName(DS.stNum), stNum: DS.stNum } } : null;
+  const legacyHubObj = DS && DS.stNum !== SC.subway.stNum && (legacy || dist(st.origin, SC.hub) <= (RS.hubRadiusM || 4000)) ? { name: SC.hub.name, stNum: SC.subway.stNum, lat: SC.hub.lat, lng: SC.hub.lng, src: 'default', pair: pairOf(SC.subway.stNum, DS.stNum), dir: subDir(SC.subway.stNum, DS.stNum), alight: { name: stName(DS.stNum), stNum: DS.stNum } } : null;
 
   // ---- 1) 일반 대중교통: 카카오 후보마다 실시간 버스 대기·열차 시각표로 다시 계산 ----
   const evalPlan = (p) => {
@@ -1399,6 +1432,7 @@ function routeCard(r, rank, base, bestId, maxMin, mapId) {
   const fareTxt = (f) => (f == null ? '요금 미확인' : won(f));
   const pills = [];
   (r.why || []).forEach((w) => pills.push(h('span', { class: 'pill ' + (off ? 'bad' : 'warn') }, w)));
+  if (!off && r.avail === 'ok') (r.est || []).forEach((w) => pills.push(h('span', { class: 'pill est' }, w)));
   // 시간·요금 비교는 모두 같은 비교 기준 경로로 (기준이 없으면 비교하지 않음)
   if (base && !r.baseline && !off) {
     const dmin = minsVs(r, base);
@@ -1424,6 +1458,7 @@ function routeCard(r, rank, base, bestId, maxMin, mapId) {
       r.live && r.avail === 'ok' ? h('span', { class: 'tag live' }, '실시간') : null,
       off ? h('span', { class: 'tag off' }, '이용 불가') : null,
       unk ? h('span', { class: 'tag assume' }, '가정값 포함') : null,
+      !off && !unk && r.est && r.est.length ? h('span', { class: 'tag est', title: r.est.join(' · ') }, '환승 대기 추정') : null,
       r.baseline ? h('span', { class: 'tag base' }, '비교 기준') : null,
       r.id === bestId ? h('span', { class: 'tag best' }, '추천') : null),
     h('div', { class: 'nums' }, h('span', { class: 'arr' }, off ? '—' : clock(r.arrive) + (r.plus ? '+' : ''), h('small', null, off ? '이용 불가' : unk ? '도착(참고)' : '도착')),
@@ -1471,9 +1506,8 @@ function exclusionText(transitAll) {
 function renderCompare(c) {
   if (!supported()) {
     clearRoute();
-    const names = SC.origins.map((p) => p.name).join(' · ');
-    c.append(h('div', { class: 'empty' }, h('b', null, `지금은 지원 출발지(${names}) ${R / 1000}km 안 → ${SC.dest.name} 구간만 비교할 수 있어요.`),
-      h('p', { style: 'margin:6px 0 10px' }, '위의 출발지 버튼을 누르거나, 다른 위치는 "주변 정류장 실시간" 탭에서 버스 도착정보를 볼 수 있습니다. 대전 전역 경로 비교는 다음 단계에서 추가됩니다.'),
+    c.append(h('div', { class: 'empty' }, h('b', null, `${supportWhy()} — 경로를 비교할 수 없어요.`),
+      h('p', { style: 'margin:6px 0 10px' }, '대전 안의 출발지와 도착지를 지도에서 누르거나 장소 검색으로 골라 주세요. 위의 출발지 버튼으로 기본 구간(→ 대전역)을 볼 수도 있어요.'),
       h('button', { class: 'pm on', onclick: () => { st.dest = { ...SC.dest }; setPoint('origin', { ...SC.origin }); } }, '기본 구간으로 돌아가기')));
     return;
   }
@@ -1506,8 +1540,9 @@ function renderCompare(c) {
     h('p', { class: 'note' }, st.plans.length
       ? `일반 대중교통: 카카오 대중교통 길찾기 경로 ${st.routeCount}개에서 같은 경로를 합치고, ${st.plans.length}개를 실시간 버스 도착·열차 시각표로 다시 계산해 도착 순 ${transitCnt}개를 보여 줘요 (카카오 전체 소요시간은 쓰지 않음).`
       : `${st.planWhy || '대중교통 길찾기 정보 없음'} → ${legacyOrigin() && !st.destSt ? `기존 고정 경로(${SC.bus.routeNo}번 → ${SC.hub.name})` : `기본 환승역(${SC.hub.name}) 기준 추정`}으로 계산했어요.`),
+    list.some((r) => r.avail === 'ok' && r.est && r.est.length) ? h('p', { class: 'note' }, `환승 대기 추정: 중간에 갈아타는 버스는 그 정류장에 도착할 때의 실시간 도착정보를 미리 알 수 없어 대기 ${TR.transferWaitMin || 5}분으로 가정해요. 처음 타는 버스·지하철·타슈·택시는 실시간·시각표로 계산해요.`) : null,
     st.destSt ? h('p', { class: 'note' }, destSt() ? `하차역: 목적지에서 가장 가까운 1호선 역 ${destSt().name}(직선 약 ${Math.round(dist(destSt(), st.dest))}m)으로 지하철 연계 경로를 계산해요.` : st.destStWhy || '목적지 근처에 1호선 역이 없어 지하철 연계 복합경로는 만들지 않아요.') : null,
-    h('p', { class: 'note' }, `복합경로: 출발지 반경 ${(RS.hubRadiusM || 4000) / 1000}km 지하철역과 카카오 경로의 승차역 중 ${hubNames}을(를) 환승역 후보로, 타슈·택시 연계 경로를 따로 계산하고, 유형별로 추가 비용 범위 안에서 가장 빨리 도착하는(이용 가능·요금 확인) 경로를 하나씩 보여 줘요 (범위 안 경로가 없으면 가장 빠른 경로를 '범위 초과'로 표시).${st.hubsWhy ? ` (${st.hubsWhy})` : ''}`),
+    hubs.length ? h('p', { class: 'note' }, `복합경로: 출발지 반경 ${(RS.hubRadiusM || 4000) / 1000}km 지하철역과 카카오 경로의 승차역 중 ${hubNames}을(를) 환승역 후보로, 타슈·택시 연계 경로를 따로 계산하고, 유형별로 추가 비용 범위 안에서 가장 빨리 도착하는(이용 가능·요금 확인) 경로를 하나씩 보여 줘요 (범위 안 경로가 없으면 가장 빠른 경로를 '범위 초과'로 표시).${st.hubsWhy ? ` (${st.hubsWhy})` : ''}`) : destSt() ? h('p', { class: 'note' }, `복합경로: 출발지 반경 ${(RS.hubRadiusM || 4000) / 1000}km 안에 환승할 1호선 역이 없어 지하철 연계 복합경로는 만들지 않아요.`) : null,
     st.origin.verified === false ? h('p', { class: 'note' }, `출발지 '${st.origin.name}' 좌표는 아직 확인 전이에요${st.origin.from ? ` (카카오 장소 검색 1순위: ${st.origin.from})` : ''}.`) : null,
     h('p', { class: 'note' }, `지하철은 대전교통공사 열차시각표(평일·휴일, 역 구간별) 기준이고 공휴일은 평일 시각표로 계산돼요. 버스 방향은 국토교통부 버스노선정보의 경유 정류장 순서로 자동 확인하고(실시간 차량의 노선 ID까지 대조), 자동 확인이 안 되면 팀이 확인한 노선·정류장 목록에 있을 때만 '확인됨'이에요. 역내 이동·택시 호출 대기·타슈 대여/반납은 가정값입니다.`),
   ].filter(Boolean));

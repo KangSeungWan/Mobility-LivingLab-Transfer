@@ -167,3 +167,14 @@ details summary::-webkit-details-marker{display:none}
 .maplegend{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
 .maplegend span{display:inline-flex;align-items:center;gap:5px}
 .maplegend i{display:inline-block;width:16px;height:4px;border-radius:2px}
+
+/* 장소 검색 결과 가독성 (update15) */
+.results li button{color:var(--ink);font-weight:700}
+.results small{color:var(--muted);font-weight:400}
+.results .acts button{background:var(--surface);color:var(--ink)}
+.search input::placeholder{color:var(--faint)}
+@media (max-width:600px){.search input{font-size:16px}}   /* 휴대폰: 16px 미만이면 입력할 때 화면이 확대됨 */
+/* PC 화면(900px 이상)에서 오른쪽 패널은 높이가 고정된 세로 flex라, 내용이 길면 검색 결과 목록 등이 0 높이로 눌림 → 줄어들지 않게 (update15) */
+.panel > *{flex-shrink:0}
+.tag.est{background:var(--surface);color:var(--muted);border:1px dashed var(--line)}
+.pill.est{border:1px dashed var(--line)}
