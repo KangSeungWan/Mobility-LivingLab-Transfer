@@ -27,7 +27,7 @@ function loadApp({ fetchImpl, now, doc }) {
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/scenario.js'), 'utf8'), ctx);
   let src = fs.readFileSync(path.join(ROOT, 'public/app.js'), 'utf8');
-  src = src.replace(/\nstart\(\);\n\}\)\(\);\s*$/, '\nwindow.__T = { st, SC, computeRoutes, pickBest, loadStops, loadArrivals, loadDrives, setPoint, search, selectOrigin, stationNum, loadTimetables, loadTransit, loadHubs, tashuFee, stationFromPlace, routeKey, hubCands, pickHubs, render, setAllowCustom, setAllowFixed, parseAllow, routeShape, cleanPath, loadLegs, drawRoute, mapRouteOf, clearRoute, showOnMap, setMap: (m) => { MAP = m; }, destSt, invalidate };\n})();');
+  src = src.replace(/\nstart\(\);\n\}\)\(\);\s*$/, '\nwindow.__T = { st, SC, computeRoutes, pickBest, loadStops, loadArrivals, loadDrives, setPoint, search, selectOrigin, stationNum, loadTimetables, loadTransit, loadHubs, tashuFee, stationFromPlace, routeKey, hubCands, pickHubs, render, setAllowCustom, setAllowFixed, parseAllow, routeShape, cleanPath, loadLegs, drawRoute, mapRouteOf, clearRoute, showOnMap, setMap: (m) => { MAP = m; }, destSt, invalidate, loadDestSt };\n})();');
   vm.runInContext(src, ctx);
   return ctx.window.__T;
 }
@@ -516,7 +516,9 @@ function world(o = {}) {
     await g.w.T.loadStops(true);
     ok('N12-12 새로고침: 같은 상한으로 모두 다시 조회 (재사용 캐시 없음)', ['transit', 'stations', 'drive', 'bike', 'walk'].every((k) => g.w.calls['/api/' + k] === 2 * c0['/api/' + k]));
     g.w.T.setPoint('dest', { name: '대전역 동광장', lat: 36.3330, lng: 127.4350 }); await sleep(30);
-    ok('N12-13 목적지만 변경: 근처 지하철역은 출발지 기준이라 다시 검색하지 않음 · 대중교통·택시는 다시 조회', g.w.calls['/api/stations'] === 2 && g.w.calls['/api/transit'] === 3 && g.w.calls['/api/drive'] === 9);
+    const stUrls = g.w.calls.urls.filter((x) => x.startsWith('/api/stations'));
+    ok('N12-13 목적지만 변경: 출발지 근처 지하철역(환승역 후보)은 다시 검색하지 않음 · 대중교통·택시는 다시 조회 · (update15) 목적지 근처 하차역 검색 1회 추가',
+      g.w.calls['/api/stations'] === 3 && stUrls.filter((x) => x.includes('lat=36.333')).length === 1 && g.w.calls['/api/transit'] === 3 && g.w.calls['/api/drive'] === 9, stUrls.join(' | '));
     // 첫 도보 길찾기 상한: 첫 단계가 BUS인 경로가 서로 다른 탑승 지점 5곳 → 도보 길찾기 3회까지, 나머지는 직선거리 규칙
     const five = () => ({ routes: [0, 1, 2, 3, 4].map((i) => ({ type: 'BUS', totalSec: 2000 + i * 60, fare: 1500, steps: [BUS(['70' + i], ['정류장' + i, '대전역'], 2000, { lat: BUS0.lat + i * 0.001, lng: BUS0.lng }, DJ), W(60, DJ, DJ)] })) });
     g = await go12({ api: { '/api/transit': five } });
@@ -1627,6 +1629,72 @@ function world(o = {}) {
     ok('D15-04 출발지만 바꾸면 하차역 유지', w.T.st.destSt && w.T.st.destSt.stNum === '111');
     w.T.invalidate('dest');
     ok('D15-05 목적지를 바꾸면 하차역 초기화(기본으로)', w.T.st.destSt === null && w.T.destSt().stNum === '104');
+  }
+
+  /* ===== update15 2단계: 목적지 근처 하차역 자동 선택 · 하차역→목적지 도보 (D15) ===== */
+  {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const SIC = { lat: 36.3512, lng: 127.3875 }, TB = { lat: 36.3474, lng: 127.3866 }, JA = { lat: 36.3290, lng: 127.4285 }, WP = { lat: 36.3583, lng: 127.3638 };
+    const stationsApi = (dest) => (u) => { const q = new URLSearchParams(u.split('?')[1]); return q.get('r') === '4000' ? { stations: [{ name: '월평역 대전1호선', lat: WP.lat, lng: WP.lng }] } : { stations: dest } };
+    const mkw = (o = {}) => { const w = world({ cfg: { route: true }, fail: o.fail || ['/api/transit'], api: { '/api/stations': o.stations || stationsApi([]), ...(o.api || {}) } }); w.T.st.subway = null; return w; };
+
+    let w = mkw();
+    w.T.st.dest = { name: '대전역 광장', lat: 36.3326, lng: 127.4344 };
+    await w.T.loadDestSt();
+    ok('D15-06 기본 목적지(대전역) 50m 안: 하차역 검색 안 함 · 기본 하차역(104) 그대로', !w.calls['/api/stations'] && w.T.st.destSt === null && w.T.destSt().stNum === '104');
+
+    w = mkw({ stations: stationsApi([{ name: '시청역 대전1호선', lat: SIC.lat, lng: SIC.lng }, { name: '탄방역 대전1호선', lat: TB.lat, lng: TB.lng }, { name: '대전시청 정류장', lat: SIC.lat, lng: SIC.lng }]) });
+    w.T.st.dest = { name: '대전시청', lat: 36.3505, lng: 127.3850 };
+    await w.T.loadDestSt();
+    const d7 = w.T.destSt();
+    w.T.st.hubSearch = [{ name: '월평역', stNum: '114', lat: WP.lat, lng: WP.lng, src: 'kakao' }];
+    ok('D15-07 목적지 근처 지하철역 검색 → 가장 가까운 1호선 역(시청 111) · 역이 아닌 장소는 무시 · 환승역 구간 114-111', d7 && d7.stNum === '111' && d7.src === 'kakao' && w.T.hubCands().every((h) => h.pair === '114-111'), `${d7 && d7.name} ${d7 && Math.round(d7.d)}m`);
+
+    w = mkw({ stations: stationsApi([{ name: '시청역 대전1호선', lat: SIC.lat, lng: SIC.lng }]) });
+    w.T.st.dest = { name: '탄방동', lat: 36.3478, lng: 127.3868 };
+    w.T.st.plans = [{ to: '110', alight: { name: '탄방역', stNum: '110', pt: TB }, subStep: null, route: { steps: [] } }];
+    await w.T.loadDestSt();
+    ok('D15-08 카카오 경로의 하차역(탄방 110)이 더 가까우면 그 역 (경로 하차 지점 좌표 기준)', w.T.destSt().stNum === '110' && w.T.destSt().src === 'route');
+
+    w = mkw({ stations: stationsApi([]) });
+    w.T.st.dest = { name: '관평동', lat: 36.4270, lng: 127.3900 };
+    await w.T.loadDestSt();
+    ok('D15-09 1.2km 안에 1호선 역 없음 → 하차역 없음 · 환승역 후보 0 · 안내 문구', w.T.destSt() === null && w.T.st.destSt.none === true && w.T.hubCands().length === 0 && /1호선 역이 없어/.test(w.T.st.destStWhy), w.T.st.destStWhy);
+    const r9 = w.T.computeRoutes();
+    const kinds9 = r9.list.map((r) => r.kind);
+    ok('D15-10 하차역이 없을 때 경로 계산: 지하철 연계 복합경로 없음 · 대중교통은 버스 추정(지하철 없음) · 오류 없음 · 지도 모양도 생성',
+      !kinds9.includes('tashuMix') && !kinds9.includes('taxiMix') && r9.list.find((r) => r.kind === 'transit').name === '버스' && !r9.list.find((r) => r.kind === 'transit').steps.some((x) => x.type === 'sub') && r9.list.every((r) => { try { w.T.routeShape(r); return true; } catch { return false; } }), kinds9.join(','));
+
+    w = mkw({ fail: ['/api/transit', '/api/stations'] });
+    w.T.st.dest = { name: '대전역 서광장', lat: 36.3320, lng: 127.4300 };
+    await w.T.loadDestSt();
+    ok('D15-11 지하철역 검색 실패여도 좌표를 아는 기본 하차역(대전역)이 1.2km 안이면 사용', w.T.destSt() && w.T.destSt().stNum === '104' && w.T.destSt().src === 'default');
+    w = mkw({ fail: ['/api/transit', '/api/stations'] });
+    w.T.st.dest = { name: '시청', lat: 36.3505, lng: 127.3850 };
+    await w.T.loadDestSt();
+    ok('D15-12 검색 실패 + 기본 하차역도 멀면 → 하차역 없음 · 안내에 실패 이유', w.T.destSt() === null && /검색 실패/.test(w.T.st.destStWhy), w.T.st.destStWhy);
+
+    // 늦게 온 응답: 검색 중에 목적지가 바뀌면 이전 결과를 적용하지 않음
+    w = mkw({ stations: stationsApi([{ name: '시청역 대전1호선', lat: SIC.lat, lng: SIC.lng }]) });
+    w.T.st.dest = { name: '시청', lat: 36.3505, lng: 127.3850 };
+    const pr = w.T.loadDestSt();
+    w.T.st.dest = { name: '대전역 광장', lat: 36.3326, lng: 127.4344 }; w.T.st.tripVer++;
+    await w.T.loadDestSt(); await pr;
+    ok('D15-13 검색 응답이 늦게 와도 그 사이 목적지가 바뀌었으면 버림', w.T.st.destSt === null && w.T.destSt().stNum === '104');
+
+    // 하차역 → 목적지 도보 길찾기 (지원 범위 안의 다른 목적지: 대전역 서쪽 450m, 하차역 = 중앙로 105)
+    const tashuX = () => ({ mock: false, stations: [{ id: 'T1', name: '출발대여소', d: 120, bikes: 5, lat: 36.365, lng: 127.346 }] });
+    w = mkw({ stations: stationsApi([{ name: '중앙로역 대전1호선', lat: JA.lat, lng: JA.lng }, { name: '대전역 대전1호선', lat: 36.3324, lng: 127.4343 }]),
+      api: { '/api/tashu': tashuX, '/api/walk': (u) => { const q = new URLSearchParams(u.split('?')[1]); return { sec: 300, m: 350, path: [[+q.get('olat'), +q.get('olng')], [+q.get('dlat'), +q.get('dlng')]] }; }, '/api/bike': () => ({ sec: 600, m: 2500 }) } });
+    w.T.st.subway = null; w.T.SC.subway.zoneConfirmed = { '114-105': 1 };
+    w.T.setPoint('dest', { name: '중앙로 근처', lat: 36.3300, lng: 127.4300 }); await sleep(40);
+    const walkDestCalls = w.calls.urls.filter((x) => x.startsWith('/api/walk') && x.includes('olat=36.3290'));
+    const rr = w.T.computeRoutes(), mixT = rr.list.find((r) => r.kind === 'tashuMix'), tailSeg = mixT && mixT.steps[mixT.steps.length - 1];
+    ok('D15-14 하차역(중앙로 105) → 목적지 도보는 카카오 도보 길찾기 1회 · 복합경로 마지막 구간에 반영(직선 추정 아님)', w.T.destSt().stNum === '105' && walkDestCalls.length === 1 && tailSeg && /카카오 도보 길찾기/.test(tailSeg.note) && Math.round(tailSeg.min) === 5 && !(mixT.why || []).some((x) => /직선거리 추정/.test(x) && /하차/.test(x)),
+      tailSeg && `${tailSeg.label} · ${tailSeg.note}`);
+    const shp = w.T.routeShape(mixT);
+    ok('D15-15 지도 모양: 하차역 이후 도보 선이 목적지에서 끝남', shp && (() => { const q = shp.parts[shp.parts.length - 1]; const e = q.pts[q.pts.length - 1]; return q.mode === 'walk' && Math.abs(e.lat - 36.33) < 1e-6 && Math.abs(e.lng - 127.43) < 1e-6; })());
+    ok('D15-16 하차역 안내 문구 상태: 자동 선택된 하차역 이름·거리', w.T.st.destSt && w.T.st.destSt.name === '중앙로역' && Math.round(w.T.st.destSt.d) > 0);
   }
 
   console.log(`\n결과: 통과 ${pass} / 실패 ${fail}`);
