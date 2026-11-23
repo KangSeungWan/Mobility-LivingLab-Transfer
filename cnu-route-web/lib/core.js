@@ -113,7 +113,8 @@ async function fetchTago(url) {
     let t;
     try { t = await fetchText(url); }
     catch (e) { if (i >= 2 || e.status === 429 || e.status === 503 || !/\(5\d\d\)|시간 초과/.test(e.message)) throw e; } // 포털 일시 오류(500 APPLICATION_ERROR 등)만 재시도. 한도 초과는 재시도 안 함
-    if (t !== undefined && (i >= 2 || !/"resultCode"\s*:\s*"?99\b/.test(t))) return t;
+    // 일시 오류는 잠깐 쉬고 다시: resultCode 99(세션 부족), 포털 공통 오류 HTTP_ERROR(코드 04, update15 배포 점검에서 확인)
+    if (t !== undefined && (i >= 2 || !(/"resultCode"\s*:\s*"?99\b/.test(t) || /HTTP_ERROR|"returnReasonCode"\s*:\s*"?04\b/.test(t)))) return t;
     await new Promise((r) => setTimeout(r, 700 * (i + 1)));
   }
 }
@@ -133,6 +134,12 @@ function tagoItems(text) {
   }
   let j;
   try { j = JSON.parse(t); } catch { throw new ApiError(502, '공공데이터 API 응답을 읽을 수 없습니다'); }
+  // 포털 공통 오류(JSON 형식): {"OpenAPI_ServiceResponse":{"cmmMsgHeader":{"errMsg":"HTTP_ERROR","returnReasonCode":"04"}}} (update15)
+  //   이전에는 response가 없어 '0건'으로 처리 → 근처 정류장 빈 목록이 하루 캐시되는 문제가 있었음. 이제 오류로 처리(캐시 안 함)
+  const env0 = j && (j.OpenAPI_ServiceResponse || (j.cmmMsgHeader ? j : null));
+  if (env0) { const m = env0.cmmMsgHeader || {}; const code = String(m.returnReasonCode || '').trim(), msg = String(m.returnAuthMsg || m.errMsg || '포털 오류');
+    throw new ApiError(502, `공공데이터 포털 오류: ${ERR_HELP[m.errMsg] || msg}${code ? ` (코드 ${code})` : ''}`); }
+  if (!j || !j.response || !j.response.header) throw new ApiError(502, '공공데이터 API 응답 형식이 올바르지 않습니다');
   const h = j.response && j.response.header;
   if (h && String(h.resultCode) !== '00') throw new ApiError(502, `공공데이터 API 오류 ${h.resultCode}: ${h.resultMsg}`);
   const items = j.response && j.response.body && j.response.body.items;
@@ -1020,4 +1027,4 @@ function handler(fn, { cacheSec = 0, perMin = 120 } = {}) {
   };
 }
 
-module.exports = { nearbyStops, arrivals, arrivalsDaejeon, busRoute, stationDist, subway, drive, config, search, stations, transit, walk, bike, tashu, health, handler, ApiError, _test: { simplifyPath, drivePath, legPath, parseTransit, parseLeg, quotaFor, parseStnDist, xmlTree, checkDistItem } };
+module.exports = { nearbyStops, arrivals, arrivalsDaejeon, busRoute, stationDist, subway, drive, config, search, stations, transit, walk, bike, tashu, health, handler, ApiError, _test: { tagoItems, simplifyPath, drivePath, legPath, parseTransit, parseLeg, quotaFor, parseStnDist, xmlTree, checkDistItem } };

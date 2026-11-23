@@ -1793,6 +1793,26 @@ function world(o = {}) {
     ok('T15-05 환승 대기 말고 다른 가정값(첫 버스 방향 미확인 등)이 섞이면 기존대로 가정값 포함', u.t.avail === 'unknown' && !u.t.est.length && u.t.why.length >= 1, u.t.why.join(' / '));
   }
 
+  /* ===== update15 배포 점검 보완: 공공데이터 포털 공통 오류(HTTP_ERROR 04)를 '0건'으로 보지 않음 (E15) ===== */
+  {
+    for (const k of Object.keys(require.cache)) if (k.includes('cnu-route-web')) delete require.cache[k];
+    Object.assign(process.env, { MOCK: '0', DATA_GO_KR_KEY: 'fake' });
+    const C = require(path.join(ROOT, 'lib/core.js'));
+    const ENV = JSON.stringify({ OpenAPI_ServiceResponse: { cmmMsgHeader: { errMsg: 'HTTP_ERROR', returnAuthMsg: 'HTTP 에러', returnReasonCode: '04' } } });
+    const OKS = JSON.stringify({ response: { header: { resultCode: '00' }, body: { items: { item: [{ citycode: 25, nodeid: 'DJB1', nodenm: '정류장', gpslati: 36.36, gpslong: 127.34, nodeno: 11111 }] } } } });
+    let thrown = null; try { C._test.tagoItems(ENV); } catch (e) { thrown = e; }
+    ok('E15-01 포털 공통 오류 JSON(OpenAPI_ServiceResponse·HTTP_ERROR 04) → 오류(502)로 처리 · 이유 표시', thrown && thrown.status === 502 && /포털 오류/.test(thrown.message) && /04/.test(thrown.message), thrown && thrown.message);
+    let n = 0; global.fetch = async () => { n++; return { ok: true, status: 200, text: async () => (n < 3 ? ENV : OKS) }; };
+    const r1 = await C.nearbyStops({ lat: '36.3611', lng: '127.3411' });
+    ok('E15-02 일시 오류는 재시도해서 정상 응답을 받음 (최대 3번)', n === 3 && r1.stops.length === 1, `fetch ${n}회`);
+    n = 0; global.fetch = async () => { n++; return { ok: true, status: 200, text: async () => ENV }; };
+    let e3 = null; try { await C.nearbyStops({ lat: '36.3622', lng: '127.3422' }); } catch (e) { e3 = e; }
+    const n3 = n; global.fetch = async () => { n++; return { ok: true, status: 200, text: async () => OKS }; };
+    const r4 = await C.nearbyStops({ lat: '36.3622', lng: '127.3422' });
+    ok('E15-03 계속 오류면 502 · 빈 목록을 캐시하지 않아 다음 요청에서 정상 조회', e3 && e3.status === 502 && n3 === 3 && r4.stops.length === 1 && n === 4, `오류 시 ${n3}회 · 다음 ${n - n3}회`);
+    process.env.MOCK = '1';
+  }
+
   console.log(`\n결과: 통과 ${pass} / 실패 ${fail}`);
   process.exit(fail ? 1 : 0);
 })();
