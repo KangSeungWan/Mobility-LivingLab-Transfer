@@ -8,7 +8,13 @@ const TASHU_STALE_MS = 3 * 60000;
 const ROUTE_STALE_MS = 15 * 60000; // 화면에 표시 중인 카카오 대중교통·도보·자전거 결과가 이보다 오래되면 '확인됨'으로 보지 않음
 const LEG_RETRY_MS = 5 * 60000;    // 실패한 도보·자전거 구간은 30초 갱신 때 바로 다시 부르지 않음 (새로고침·위치 변경 때는 다시 조회)
 const RS = SC.search || {};        // 경로 탐색 범위·상한 (scenario.js search · update12)
-const DEST_ST = SC.subway.destStNum;   // 목적지 지하철역 (대전역 104) — 복합경로는 여기까지 지하철
+// 하차역 (update15): 목적지에서 내릴 지하철역. 1단계에서는 기본값(대전역 104)만 쓰고, 다음 단계에서 목적지마다 자동으로 정함
+//   { stNum, name, lat, lng, src } — src: 'default'(scenario.js 기본 목적지) · 이후 'route'(카카오 경로의 하차역)·'kakao'(목적지 근처 역 검색)
+function destSt() {
+  if (st && st.destSt && st.destSt.stNum) return st.destSt;
+  const no = SC.subway.destStNum;
+  return { stNum: no, name: stName(no), lat: SC.dest.lat, lng: SC.dest.lng, src: 'default' };
+}
 
 // update12: A~E 고정 유형 없음. 화면 경로 = 일반 대중교통(카카오 후보를 실시간으로 다시 계산, 최대 5) + 전 구간 택시 + 전 구간 타슈
 //   + 복합경로(환승역 후보마다 타슈·택시 연계를 계산해 유형별 대표 1개). 비교 기준 = 실시간·요금이 확인된 가장 빠른 일반 대중교통 경로
@@ -22,6 +28,7 @@ const st = {
   routeInfo: {},                                                       // 버스 노선·경유 정류장(TAGO, 공공 데이터) — 노선 번호별, 이 세션 동안 사용
   stops: [], stopsErr: null, arr: {}, drive: {}, cfg: { mock: true, drive: false }, loading: false, updated: null,
   map: null, overlays: {}, stopOverlays: [], open: new Set(),
+  destSt: null,   // 하차역 (update15) — null이면 기본(대전역)
   mapSel: null, routeOverlays: [], mapSig: null, mapFitKey: null,   // 지도 경로 표시 (update14): 사용자가 고른 경로 id · 그려진 선 · 같은 모양이면 다시 안 그림 · 같은 경로면 다시 맞추지 않음
   gen: 0, arrBusy: 0, tashuAt: 0,
 };
@@ -187,6 +194,7 @@ function drawStops() {
 function invalidate(which) {
   st.mapSel = null;
   st.plans = []; st.plansAt = 0; st.planWhy = null; st.routeCount = 0; st.extraStops = []; st.legs = {}; st.tashuNear = {}; st.drive = {};
+  if (which === 'dest') st.destSt = null;            // 하차역은 목적지에 달려 있음 (update15)
   if (which === 'origin') { st.stops = []; st.arr = {}; st.tashu = null; st.tashuAt = 0; st.hubSearch = []; st.hubsWhy = null; }
 }
 function setPoint(which, p, keepView) {
@@ -714,9 +722,9 @@ async function loadHubs() {
   if (!ok()) return;
   st.hubSearch = list; st.hubsWhy = why;
 }
-// 환승역 후보 = 근처 지하철역 검색 결과 ∪ 카카오 대중교통 경로에 나온 승차역 (대전역 제외). 둘 다 없으면 기본 환승역(가정)
+// 환승역 후보 = 근처 지하철역 검색 결과 ∪ 카카오 대중교통 경로에 나온 승차역 (하차역 destSt() 제외). 둘 다 없으면 기본 환승역(가정)
 //   1차 추정(직선거리·역 수)이 짧은 순 hubCandMax곳. A(특정 대중교통 경로)의 환승역에 묶이지 않음
-const rideEst = (stNum) => Math.abs(Number(stNum) - Number(DEST_ST)) * (SC.subway.minPerStation || 2);
+const rideEst = (stNum) => Math.abs(Number(stNum) - Number(destSt().stNum)) * (SC.subway.minPerStation || 2);
 function hubEst(mode, hb) {
   const T = SC.tashu, ride = rideEst(hb.stNum);
   return mode === 'taxi' ? SC.taxi.waitMin + estMin(st.origin, hb, SC.taxi.estKmh || 25) + SC.taxi.hubWalkMin + ride
@@ -724,11 +732,11 @@ function hubEst(mode, hb) {
 }
 function hubCands() {
   const m = new Map();
-  for (const s of st.hubSearch) if (s.stNum !== DEST_ST && !m.has(s.stNum)) m.set(s.stNum, { name: s.name, stNum: s.stNum, lat: s.lat, lng: s.lng, src: 'kakao' });
-  for (const p of st.plans) if (p.hub && p.from !== DEST_ST && !m.has(p.from)) m.set(p.from, { name: p.hub.name, stNum: p.from, lat: p.hub.lat, lng: p.hub.lng, src: 'route' });
+  for (const s of st.hubSearch) if (s.stNum !== destSt().stNum && !m.has(s.stNum)) m.set(s.stNum, { name: s.name, stNum: s.stNum, lat: s.lat, lng: s.lng, src: 'kakao' });
+  for (const p of st.plans) if (p.hub && p.from !== destSt().stNum && !m.has(p.from)) m.set(p.from, { name: p.hub.name, stNum: p.from, lat: p.hub.lat, lng: p.hub.lng, src: 'route' });
   let list = [...m.values()];
   if (!list.length) list = [{ name: SC.hub.name, stNum: SC.subway.stNum, lat: SC.hub.lat, lng: SC.hub.lng, src: 'default' }];
-  return list.map((hb) => ({ ...hb, d: dist(st.origin, hb), pair: pairOf(hb.stNum, DEST_ST), dir: subDir(hb.stNum, DEST_ST), alight: { name: stName(DEST_ST), stNum: DEST_ST } }))
+  return list.map((hb) => ({ ...hb, d: dist(st.origin, hb), pair: pairOf(hb.stNum, destSt().stNum), dir: subDir(hb.stNum, destSt().stNum), alight: { name: stName(destSt().stNum), stNum: destSt().stNum } }))
     .sort((a, b) => hubEst('tashu', a) - hubEst('tashu', b)).slice(0, RS.hubCandMax || 6);
 }
 // 길찾기 API를 부를 환승역: 유형별 1차 추정 상위 N곳 (나머지 후보는 추정값으로만 계산 → '가정값 포함'이라 대표로 뽑히지 않음)
@@ -870,15 +878,15 @@ function finalWalk(p) {
   const m = dist(last.end, st.dest);
   return m <= 30 ? [] : [{ type: 'walk', min: walkMin(m), label: `${st.dest.name}까지 도보`, note: `약 ${Math.round(m)}m (직선거리 × 1.25)` }];
 }
-// 복합경로·기존 고정 경로의 지하철 하차(대전역) 후 목적지까지: 대전역에서 내려 도보로만 끝나는 카카오 경로의 하차 후 구간을 같이 씀,
-//   그런 경로가 없으면 대전역(기준점) → 목적지 직선거리 도보(30m 넘으면 추정값으로 표시)
+// 복합경로·기존 고정 경로의 지하철 하차(하차역 destSt()) 후 목적지까지: 그 역에서 내려 도보로만 끝나는 카카오 경로의 하차 후 구간을 같이 씀,
+//   그런 경로가 없으면 하차역(기준점) → 목적지 직선거리 도보(30m 넘으면 추정값으로 표시)
 function tailAtDest(unk) {
-  const p = st.plans.find((x) => x.to === DEST_ST && x.subStep && x.route.steps.slice(x.route.steps.indexOf(x.subStep) + 1).every((s) => s.type === 'WALKING'));
+  const p = st.plans.find((x) => x.to === destSt().stNum && x.subStep && x.route.steps.slice(x.route.steps.indexOf(x.subStep) + 1).every((s) => s.type === 'WALKING'));
   if (p) return [...laterSegs(p.route.steps.slice(p.route.steps.indexOf(p.subStep) + 1), unk, p.namesOf), ...finalWalk(p)];
-  const m = dist(SC.dest, st.dest);
+  const m = dist(destSt(), st.dest);
   if (m < 30) return [];
   unk.push('하차 후 목적지까지 직선거리 추정');
-  return [{ type: 'walk', min: walkMin(m), label: `${st.dest.name}까지 도보`, note: `${stName(DEST_ST)}에서 약 ${Math.round(m)}m · 직선거리 추정` }];
+  return [{ type: 'walk', min: walkMin(m), label: `${st.dest.name}까지 도보`, note: `${stName(destSt().stNum)}에서 약 ${Math.round(m)}m · 직선거리 추정` }];
 }
 
 /* ---------------- 요금 (공식 요금표 · scenario.js fare) ---------------- */
@@ -933,7 +941,7 @@ function computeRoutes(allow = st.allow) {
   const subFareOf = (pair) => { const z = subwayZone(pair); return z ? { fare: F.subway['zone' + z.zone], zone: z } : null; };
   const fareUnk = (hb, ok) => (ok ? [] : [`요금 미확인 (지하철 ${hb.name}→${hb.alight.name} 요금 구간 확인 필요)`]);
   const planStale = st.plans.length && now - st.plansAt > ROUTE_STALE_MS ? ['경로 정보가 오래됨 · 새로고침 필요'] : [];
-  const legacyHubObj = { name: SC.hub.name, stNum: SC.subway.stNum, lat: SC.hub.lat, lng: SC.hub.lng, src: 'default', pair: pairOf(SC.subway.stNum, DEST_ST), dir: subDir(SC.subway.stNum, DEST_ST), alight: { name: stName(DEST_ST), stNum: DEST_ST } };
+  const legacyHubObj = { name: SC.hub.name, stNum: SC.subway.stNum, lat: SC.hub.lat, lng: SC.hub.lng, src: 'default', pair: pairOf(SC.subway.stNum, destSt().stNum), dir: subDir(SC.subway.stNum, destSt().stNum), alight: { name: stName(destSt().stNum), stNum: destSt().stNum } };
 
   // ---- 1) 일반 대중교통: 카카오 후보마다 실시간 버스 대기·열차 시각표로 다시 계산 ----
   const evalPlan = (p) => {
@@ -1017,7 +1025,7 @@ function computeRoutes(allow = st.allow) {
     segs.push(...subwaySegs(segs, hb, unk, no), ...tailAtDest(unk));
     const z = subwayZone(hb.pair), fare = z ? F.busSubway['zone' + z.zone] : null;              // 시내버스 1회 + 도시철도 환승 (공식 환승운임표)
     unk.push(...fareUnk(hb, !!z));
-    return build({ id: 'transit:legacy108', kind: 'transit', name: '버스 + 지하철', sub: `${SC.bus.routeNo}번 → ${SC.hub.name} → 1호선 → ${stName(DEST_ST)}`, fare, live: !!(bus && bus.catchable), bus,
+    return build({ id: 'transit:legacy108', kind: 'transit', name: '버스 + 지하철', sub: `${SC.bus.routeNo}번 → ${SC.hub.name} → 1호선 → ${stName(destSt().stNum)}`, fare, live: !!(bus && bus.catchable), bus,
       fareNote: z ? `시내버스+지하철 ${z.zone}구간 환승 (${z.src})` : null, ...status(no, unk) }, segs);
   };
   const estimateTransit = () => {
@@ -1174,7 +1182,7 @@ function subwayShape(hb) {
   }
   if (!best) {
     const ap = (st.plans.find((p) => p.to === hb.alight.stNum && p.alight && validPt(p.alight.pt)) || {}).alight;
-    const end = ap ? ap.pt : hb.alight.stNum === DEST_ST ? SC.dest : null;
+    const end = ap ? ap.pt : hb.alight.stNum === destSt().stNum ? destSt() : null;
     return validPt(end) ? [{ mode: 'subway', pts: [from, ptOf(end)], approx: true }] : [];
   }
   const out = [], { n, pts } = best;
@@ -1195,7 +1203,7 @@ function routeShape(r) {
   const mark = (p, kind, label) => { if (validPt(p)) marks.push({ pt: ptOf(p), kind, label }); };
   // 하차역 이후 목적지까지: 같은 하차역에서 내려 걷기만 하는 카카오 경로의 도보 좌표 → 그래도 멀면 직선
   const tail = () => {
-    const p = st.plans.find((x) => x.to === DEST_ST && x.subStep && x.route.steps.slice(x.route.steps.indexOf(x.subStep) + 1).every((s) => s.type === 'WALKING'));
+    const p = st.plans.find((x) => x.to === destSt().stNum && x.subStep && x.route.steps.slice(x.route.steps.indexOf(x.subStep) + 1).every((s) => s.type === 'WALKING'));
     if (p) for (const s of p.route.steps.slice(p.route.steps.indexOf(p.subStep) + 1)) { link('walk', s.start); line('walk', s.path, s.start, s.end); }
     link('walk', st.dest);
   };
@@ -1223,7 +1231,7 @@ function routeShape(r) {
     }
     link('walk', st.dest);
   } else if (r.kind === 'transit') {                  // 기존 고정 경로(108번)·직선 추정: 좌표가 없어 직선으로만
-    const hb = { name: SC.hub.name, stNum: SC.subway.stNum, lat: SC.hub.lat, lng: SC.hub.lng, alight: { name: stName(DEST_ST), stNum: DEST_ST } };
+    const hb = { name: SC.hub.name, stNum: SC.subway.stNum, lat: SC.hub.lat, lng: SC.hub.lng, alight: { name: stName(destSt().stNum), stNum: destSt().stNum } };
     const stop = r.bus && r.bus.stop && validPt(r.bus.stop) ? r.bus.stop : null;
     if (stop) { link('walk', stop); mark(stop, 'board', `${r.bus.routeNo}번 승차`); }
     link('bus', hb);

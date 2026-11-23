@@ -27,7 +27,7 @@ function loadApp({ fetchImpl, now, doc }) {
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'public/scenario.js'), 'utf8'), ctx);
   let src = fs.readFileSync(path.join(ROOT, 'public/app.js'), 'utf8');
-  src = src.replace(/\nstart\(\);\n\}\)\(\);\s*$/, '\nwindow.__T = { st, SC, computeRoutes, pickBest, loadStops, loadArrivals, loadDrives, setPoint, search, selectOrigin, stationNum, loadTimetables, loadTransit, loadHubs, tashuFee, stationFromPlace, routeKey, hubCands, pickHubs, render, setAllowCustom, setAllowFixed, parseAllow, routeShape, cleanPath, loadLegs, drawRoute, mapRouteOf, clearRoute, showOnMap, setMap: (m) => { MAP = m; } };\n})();');
+  src = src.replace(/\nstart\(\);\n\}\)\(\);\s*$/, '\nwindow.__T = { st, SC, computeRoutes, pickBest, loadStops, loadArrivals, loadDrives, setPoint, search, selectOrigin, stationNum, loadTimetables, loadTransit, loadHubs, tashuFee, stationFromPlace, routeKey, hubCands, pickHubs, render, setAllowCustom, setAllowFixed, parseAllow, routeShape, cleanPath, loadLegs, drawRoute, mapRouteOf, clearRoute, showOnMap, setMap: (m) => { MAP = m; }, destSt, invalidate };\n})();');
   vm.runInContext(src, ctx);
   return ctx.window.__T;
 }
@@ -1609,6 +1609,24 @@ function world(o = {}) {
     ok('V14-09 카카오맵이 아니면(OpenStreetMap 대체) 경로 선을 그리지 않음 (약관 확인 전)', rec.lines.length === 0 && w.T.st.routeOverlays.length === 0);
     w.T.setMap(null); reset();
     ok('V14-10 지도가 없을 때(불러오기 실패·로딩 전)도 오류 없이 화면 계산', (() => { try { w.T.render(); return w.T.drawRoute(list[0]) === null; } catch (e) { return false; } })());
+  }
+
+  /* ===== update15 1단계: 하차역 고정값(대전역 104) → destSt() 함수 (동작 변화 없음) (D15) ===== */
+  {
+    const w = world({});
+    const d0 = w.T.destSt();
+    ok('D15-01 기본 하차역 = 대전역(104), 좌표 = 기본 목적지', d0.stNum === '104' && d0.name === '대전역' && d0.lat === w.T.SC.dest.lat && d0.lng === w.T.SC.dest.lng && d0.src === 'default');
+    w.T.st.hubSearch = [{ name: '월평역', stNum: '114', lat: 36.3583, lng: 127.3638, src: 'kakao' }, { name: '시청역', stNum: '111', lat: 36.3512, lng: 127.3875, src: 'kakao' }, { name: '대전역', stNum: '104', lat: 36.3324, lng: 127.4343, src: 'kakao' }];
+    let hc = w.T.hubCands();
+    ok('D15-02 기본: 환승역 후보에서 하차역(대전역) 제외 · 모든 후보의 하차역·역 구간이 104', !hc.some((h) => h.stNum === '104') && hc.every((h) => h.alight.stNum === '104' && h.pair === h.stNum + '-104'), hc.map((h) => h.pair).join(','));
+    w.T.st.destSt = { stNum: '111', name: '시청역', lat: 36.3512, lng: 127.3875, src: 'kakao' };
+    hc = w.T.hubCands();
+    ok('D15-03 하차역을 바꾸면(시청 111): 후보에서 111 제외 · 하차역·역 구간·방향이 따라 바뀜', !hc.some((h) => h.stNum === '111') && hc.every((h) => h.alight.stNum === '111' && h.alight.name === '시청역' && h.pair === h.stNum + '-111')
+      && hc.find((h) => h.stNum === '114').dir === '0' && hc.find((h) => h.stNum === '104').dir === '1', hc.map((h) => `${h.pair}/${h.dir}`).join(','));
+    w.T.invalidate('origin');
+    ok('D15-04 출발지만 바꾸면 하차역 유지', w.T.st.destSt && w.T.st.destSt.stNum === '111');
+    w.T.invalidate('dest');
+    ok('D15-05 목적지를 바꾸면 하차역 초기화(기본으로)', w.T.st.destSt === null && w.T.destSt().stNum === '104');
   }
 
   console.log(`\n결과: 통과 ${pass} / 실패 ${fail}`);
